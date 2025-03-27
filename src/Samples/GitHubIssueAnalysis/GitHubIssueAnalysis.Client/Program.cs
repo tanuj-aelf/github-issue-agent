@@ -8,6 +8,29 @@ using Orleans.Runtime;
 using Orleans.Streams;
 using Serilog;
 using Serilog.Events;
+using System.IO;
+
+// Load .env file if it exists
+string basePath = AppDomain.CurrentDomain.BaseDirectory;
+string envFile = Path.Combine(Directory.GetCurrentDirectory(), ".env");
+if (File.Exists(envFile))
+{
+    Console.WriteLine($"Loading environment variables from: {envFile}");
+    foreach (var line in File.ReadAllLines(envFile))
+    {
+        if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#"))
+            continue;
+            
+        var parts = line.Split('=', 2, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 2)
+        {
+            var key = parts[0].Trim();
+            var value = parts[1].Trim();
+            Environment.SetEnvironmentVariable(key, value);
+            Console.WriteLine($"Loaded environment variable: {key}");
+        }
+    }
+}
 
 // Configure logging
 Log.Logger = new LoggerConfiguration()
@@ -42,8 +65,22 @@ var host = Host.CreateDefaultBuilder()
         // Register our GitHub client with configuration
         services.AddTransient<GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubClient>(provider => 
         {
-            // Use configuration for PAT if available
-            string personalAccessToken = hostContext.Configuration["GitHub:PersonalAccessToken"] ?? "";
+            // Use configuration for PAT if available, or fallback to environment variable
+            var configuration = provider.GetRequiredService<IConfiguration>();
+            string personalAccessToken = configuration["GitHub:PersonalAccessToken"] ?? "";
+            
+            // Check if empty and try environment variable
+            if (string.IsNullOrEmpty(personalAccessToken))
+            {
+                personalAccessToken = Environment.GetEnvironmentVariable("GITHUB_PERSONAL_ACCESS_TOKEN") ?? "";
+                Console.WriteLine("Using GitHub token from environment variable");
+            }
+            
+            if (string.IsNullOrEmpty(personalAccessToken))
+            {
+                Console.WriteLine("WARNING: No GitHub Personal Access Token found. Some GitHub API calls may fail.");
+            }
+            
             return new GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubClient(personalAccessToken: personalAccessToken);
         });
     })

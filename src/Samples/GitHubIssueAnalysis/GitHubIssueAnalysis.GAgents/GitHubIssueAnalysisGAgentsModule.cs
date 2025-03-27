@@ -21,35 +21,59 @@ public static class GitHubIssueAnalysisGAgentsModule
         services.AddTransient<GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubClient>(provider => 
         {
             // Use a Personal Access Token (PAT) from configuration if available
-            // For security reasons, you should use user secrets (dotnet user-secrets) or environment variables
-            // This is just for demo purposes - in a real app, never store tokens in code
+            // First check appsettings.json, then environment variables
             string personalAccessToken = configuration?.GetValue<string>("GitHub:PersonalAccessToken") ?? "";
+            
+            // If token is empty, try environment variable
+            if (string.IsNullOrEmpty(personalAccessToken))
+            {
+                personalAccessToken = Environment.GetEnvironmentVariable("GITHUB_PERSONAL_ACCESS_TOKEN") ?? "";
+                var logger = provider.GetRequiredService<ILogger<GitHubAnalysisGAgent>>();
+                logger.LogInformation("Using GitHub token from environment variable");
+            }
             
             return new GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubClient(personalAccessToken);
         });
 
-        // Configure Azure OpenAI Options if configuration is provided
+        // Configure Azure OpenAI Options from configuration or environment variables
         if (configuration != null)
         {
             services.Configure<AzureOpenAIOptions>(options =>
             {
+                // First try configuration
                 options.ApiKey = configuration["AzureOpenAI:ApiKey"] ?? "";
                 options.Endpoint = configuration["AzureOpenAI:Endpoint"] ?? "";
                 options.DeploymentName = configuration["AzureOpenAI:DeploymentName"] ?? "";
                 options.ModelName = configuration["AzureOpenAI:ModelName"] ?? "gpt-35-turbo";
                 options.ApiVersion = configuration["AzureOpenAI:ApiVersion"] ?? "2024-02-15-preview";
+                
+                // If values are empty, try environment variables
+                if (string.IsNullOrEmpty(options.ApiKey))
+                    options.ApiKey = Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY") ?? "";
+                
+                if (string.IsNullOrEmpty(options.Endpoint))
+                    options.Endpoint = Environment.GetEnvironmentVariable("AZURE_OPENAI_ENDPOINT") ?? "";
+                
+                if (string.IsNullOrEmpty(options.DeploymentName))
+                    options.DeploymentName = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_NAME") ?? "";
+                
+                if (string.IsNullOrEmpty(options.ModelName))
+                    options.ModelName = Environment.GetEnvironmentVariable("AZURE_OPENAI_MODEL_NAME") ?? "gpt-35-turbo";
+                
+                if (string.IsNullOrEmpty(options.ApiVersion))
+                    options.ApiVersion = Environment.GetEnvironmentVariable("AZURE_OPENAI_API_VERSION") ?? "2024-02-15-preview";
             });
         }
         else 
         {
-            // Use default empty values if no configuration is provided
+            // If no configuration, try environment variables
             services.Configure<AzureOpenAIOptions>(options =>
             {
-                options.ApiKey = "";
-                options.Endpoint = "";
-                options.DeploymentName = "";
-                options.ModelName = "gpt-35-turbo";
-                options.ApiVersion = "2024-02-15-preview";
+                options.ApiKey = Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY") ?? "";
+                options.Endpoint = Environment.GetEnvironmentVariable("AZURE_OPENAI_ENDPOINT") ?? "";
+                options.DeploymentName = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_NAME") ?? "";
+                options.ModelName = Environment.GetEnvironmentVariable("AZURE_OPENAI_MODEL_NAME") ?? "gpt-35-turbo";
+                options.ApiVersion = Environment.GetEnvironmentVariable("AZURE_OPENAI_API_VERSION") ?? "2024-02-15-preview";
             });
         }
 
@@ -61,21 +85,30 @@ public static class GitHubIssueAnalysisGAgentsModule
                 client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             });
 
-        // Configure Google Gemini Options if configuration is provided
+        // Configure Google Gemini Options from configuration or environment variables
         if (configuration != null)
         {
             services.Configure<GoogleGeminiOptions>(options =>
             {
+                // First try configuration
                 options.ApiKey = configuration["GoogleGemini:ApiKey"] ?? "";
                 options.Model = configuration["GoogleGemini:Model"] ?? "gemini-pro";
+                
+                // If values are empty, try environment variables
+                if (string.IsNullOrEmpty(options.ApiKey))
+                    options.ApiKey = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_API_KEY") ?? "";
+                
+                if (string.IsNullOrEmpty(options.Model))
+                    options.Model = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_MODEL") ?? "gemini-pro";
             });
         }
         else
         {
+            // If no configuration, try environment variables
             services.Configure<GoogleGeminiOptions>(options =>
             {
-                options.ApiKey = "";
-                options.Model = "gemini-pro";
+                options.ApiKey = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_API_KEY") ?? "";
+                options.Model = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_MODEL") ?? "gemini-pro";
             });
         }
 
@@ -102,10 +135,18 @@ public static class GitHubIssueAnalysisGAgentsModule
             logger.LogWarning("Creating CompositeLLMService");
             
             // Extract configuration settings for debugging
-            var azureApiKey = configuration?["AzureOpenAI:ApiKey"] ?? "";
-            var azureEndpoint = configuration?["AzureOpenAI:Endpoint"] ?? "";
-            var geminiApiKey = configuration?["GoogleGemini:ApiKey"] ?? "";
-            var useFallbackLLM = configuration?.GetValue<bool>("UseFallbackLLM") ?? false;
+            var azureApiKey = configuration?["AzureOpenAI:ApiKey"] ?? Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY") ?? "";
+            var azureEndpoint = configuration?["AzureOpenAI:Endpoint"] ?? Environment.GetEnvironmentVariable("AZURE_OPENAI_ENDPOINT") ?? "";
+            var geminiApiKey = configuration?["GoogleGemini:ApiKey"] ?? Environment.GetEnvironmentVariable("GOOGLE_GEMINI_API_KEY") ?? "";
+            
+            // Try configuration first, then environment variable
+            bool useFallbackLLM = configuration?.GetValue<bool>("UseFallbackLLM") ?? false;
+            if (!useFallbackLLM)
+            {
+                string envFallback = Environment.GetEnvironmentVariable("USE_FALLBACK_LLM") ?? "";
+                useFallbackLLM = !string.IsNullOrEmpty(envFallback) && 
+                                 (envFallback.ToLower() == "true" || envFallback == "1");
+            }
             
             logger.LogWarning("Azure OpenAI API Key present: {HasKey}", !string.IsNullOrEmpty(azureApiKey));
             logger.LogWarning("Azure OpenAI Endpoint present: {HasEndpoint}", !string.IsNullOrEmpty(azureEndpoint));
@@ -124,13 +165,13 @@ public static class GitHubIssueAnalysisGAgentsModule
             }
             
             // Otherwise, try cloud services first (in order of preference)
-            if (!string.IsNullOrEmpty(configuration?["AzureOpenAI:ApiKey"]))
+            if (!string.IsNullOrEmpty(azureApiKey))
             {
                 logger.LogWarning("Adding AzureOpenAIService to composite service");
                 services.Add(provider.GetRequiredService<AzureOpenAIService>());
             }
             
-            if (!string.IsNullOrEmpty(configuration?["GoogleGemini:ApiKey"]))
+            if (!string.IsNullOrEmpty(geminiApiKey))
             {
                 logger.LogWarning("Adding GoogleGeminiService to composite service");
                 services.Add(provider.GetRequiredService<GoogleGeminiService>());

@@ -1,3 +1,38 @@
+# .NET build files
+*.swp
+*.*~
+project.lock.json
+.DS_Store
+*.pyc
+nupkg/
+
+# Visual Studio files
+.vs/
+.vscode/
+**/bin/
+**/obj/
+**/TestResults/
+*.user
+*.suo
+*.userprefs
+*.sln.docstates
+*.dll.config
+*.cache
+*.pdb
+*.dll
+**/Properties/launchSettings.json
+
+# Environment Configuration
+*.env
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+appsettings.Development.json
+appsettings.Production.json
+appsettings.local.json
+
 # Build results
 [Dd]ebug/
 [Dd]ebugPublic/
@@ -5,27 +40,27 @@
 [Rr]eleases/
 x64/
 x86/
-[Aa][Rr][Mm]/
-[Aa][Rr][Mm]64/
+build/
 bld/
 [Bb]in/
 [Oo]bj/
-[Ll]og/
-[Ll]ogs/
+[Oo]ut/
+msbuild.log
+msbuild.err
+msbuild.wrn
 
-# Visual Studio files
-.vs/
-.vscode/
-*.user
-*.userosscache
-*.suo
-*.userprefs
-*.dbmdl
-*.dbproj.schemaview
-*.jfm
-*.pfx
-*.publishsettings
-orleans.codegen.cs
+# Log files
+*.log
+
+# IDE files
+.idea/
+*.sln.iml
+
+# NuGet
+packages/
+*.nupkg
+# NuGet Symbol Packages
+*.snupkg
 
 # ReSharper
 _ReSharper*/

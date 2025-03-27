@@ -7,6 +7,29 @@ using Serilog;
 using Serilog.Events;
 using OrleansDashboard;
 using Orleans.EventSourcing;
+using System.IO;
+
+// Load .env file if it exists
+string basePath = AppDomain.CurrentDomain.BaseDirectory;
+string envFile = Path.Combine(Directory.GetCurrentDirectory(), ".env");
+if (File.Exists(envFile))
+{
+    Console.WriteLine($"Loading environment variables from: {envFile}");
+    foreach (var line in File.ReadAllLines(envFile))
+    {
+        if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#"))
+            continue;
+            
+        var parts = line.Split('=', 2, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 2)
+        {
+            var key = parts[0].Trim();
+            var value = parts[1].Trim();
+            Environment.SetEnvironmentVariable(key, value);
+            Console.WriteLine($"Loaded environment variable: {key}");
+        }
+    }
+}
 
 // Configure logging
 Log.Logger = new LoggerConfiguration()
