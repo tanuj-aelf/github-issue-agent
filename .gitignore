@@ -1,0 +1,102 @@
+# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio files
+.vs/
+.vscode/
+*.user
+*.userosscache
+*.suo
+*.userprefs
+*.dbmdl
+*.dbproj.schemaview
+*.jfm
+*.pfx
+*.publishsettings
+orleans.codegen.cs
+
+# ReSharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# JetBrains Rider
+.idea/
+*.sln.iml
+
+# NuGet Packages
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+*.nuget.props
+*.nuget.targets
+
+# User-specific files
+*.rsuser
+*.sln.docstates
+
+# MSTest test Results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+
+# .NET Core
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# Local development files
+appsettings.Development.json
+appsettings.local.json
+local.settings.json
+
+# Logs
+*.log
+
+# SQLite database files
+*.db
+*.sqlite
+*.sqlite3
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# MongoDB
+mongodb/data/
+mongodb/log/
+
+# ABP Framework specific
+.entity-framework-core.db
+
+# Orleans
+orleans.log
+
+# Docker volumes
+docker-volumes/
+
+# Secrets and keys
+**/Properties/launchSettings.json
+**/secrets.json
+**/secrets.*.json
+*.pfx
+*.key
+*.pem 

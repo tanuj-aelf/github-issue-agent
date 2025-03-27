@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "aevatar.ai",
+  "classifications": [ "Orleans", "Silo", "Starter", "Aevatar" ],
+  "identity": "Aevatar.Template",
+  "name": "Aevatar Starter Template",
+  "shortName": "aevatar-starter",
+  "sourceName": "AevatarStarter",
+  "tags": {
+    "language": "C#",
+    "type": "project"
+  },
+  "sources": [
+    {
+      "exclude": [ ".template.config/**" ]
+    }
+  ],
+  "symbols": {
+    "siloProjectName": {
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "AevatarTemplate.Silo",
+      "replaces": "{SILO_PROJECT_NAME}"
+    },
+    "clientProjectName": {
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "AevatarTemplate.Client",
+      "replaces": "{CLIENT_PROJECT_NAME}"
+    },
+    "gAgentsProjectName": {
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "AevatarTemplate.GAgents",
+      "replaces": "{GAGENTS_PROJECT_NAME}"
+    },
+    "testProjectName": {
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "AevatarTemplate.Tests",
+      "replaces": "{TEST_PROJECT_NAME}"
+    }
+  }
+}
