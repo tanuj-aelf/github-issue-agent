@@ -6,6 +6,7 @@ using System.Net.Http.Headers;
 using Polly;
 using Polly.Extensions.Http;
 using Octokit;
+using Microsoft.Extensions.Logging;
 
 namespace GitHubIssueAnalysis.GAgents;
 
@@ -60,20 +61,90 @@ public static class GitHubIssueAnalysisGAgentsModule
                 client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             });
 
-        // Register LLM Service - use AzureOpenAIService if API key is provided, otherwise use FallbackLLMService
-        services.AddTransient<ILLMService>(provider =>
+        // Configure Google Gemini Options if configuration is provided
+        if (configuration != null)
         {
-            var apiKey = configuration?["AzureOpenAI:ApiKey"];
-            if (!string.IsNullOrEmpty(apiKey))
+            services.Configure<GoogleGeminiOptions>(options =>
             {
-                return provider.GetRequiredService<AzureOpenAIService>();
+                options.ApiKey = configuration["GoogleGemini:ApiKey"] ?? "";
+                options.Model = configuration["GoogleGemini:Model"] ?? "gemini-pro";
+            });
+        }
+        else
+        {
+            services.Configure<GoogleGeminiOptions>(options =>
+            {
+                options.ApiKey = "";
+                options.Model = "gemini-pro";
+            });
+        }
+
+        // Add HTTP client for Google Gemini with Polly for resilience
+        services.AddHttpClient("GoogleGemini")
+            .AddPolicyHandler(GetRetryPolicy())
+            .ConfigureHttpClient(client =>
+            {
+                client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            });
+
+        // Register Google Gemini Service
+        services.AddTransient<GoogleGeminiService>();
+
+        // Register all LLM service implementations
+        services.AddTransient<AzureOpenAIService>();
+        services.AddTransient<GoogleGeminiService>();
+        services.AddTransient<FallbackLLMService>();
+
+        // Register composite LLM service that will try services in order
+        services.AddTransient<CompositeLLMService>(provider => 
+        {
+            var logger = provider.GetRequiredService<ILogger<CompositeLLMService>>();
+            logger.LogWarning("Creating CompositeLLMService");
+            
+            // Extract configuration settings for debugging
+            var azureApiKey = configuration?["AzureOpenAI:ApiKey"] ?? "";
+            var azureEndpoint = configuration?["AzureOpenAI:Endpoint"] ?? "";
+            var geminiApiKey = configuration?["GoogleGemini:ApiKey"] ?? "";
+            var useFallbackLLM = configuration?.GetValue<bool>("UseFallbackLLM") ?? false;
+            
+            logger.LogWarning("Azure OpenAI API Key present: {HasKey}", !string.IsNullOrEmpty(azureApiKey));
+            logger.LogWarning("Azure OpenAI Endpoint present: {HasEndpoint}", !string.IsNullOrEmpty(azureEndpoint));
+            logger.LogWarning("Google Gemini API Key present: {HasKey}", !string.IsNullOrEmpty(geminiApiKey));
+            logger.LogWarning("UseFallbackLLM flag: {UseFallbackLLM}", useFallbackLLM);
+            
+            // Build the list of services to try in order
+            var services = new List<ILLMService>();
+            
+            // If fallback flag is set, only use the mock service
+            if (useFallbackLLM)
+            {
+                logger.LogWarning("UseFallbackLLM flag is set, using only the FallbackLLMService");
+                services.Add(provider.GetRequiredService<FallbackLLMService>());
+                return new CompositeLLMService(logger, services);
             }
-            return provider.GetRequiredService<FallbackLLMService>();
+            
+            // Otherwise, try cloud services first (in order of preference)
+            if (!string.IsNullOrEmpty(configuration?["AzureOpenAI:ApiKey"]))
+            {
+                logger.LogWarning("Adding AzureOpenAIService to composite service");
+                services.Add(provider.GetRequiredService<AzureOpenAIService>());
+            }
+            
+            if (!string.IsNullOrEmpty(configuration?["GoogleGemini:ApiKey"]))
+            {
+                logger.LogWarning("Adding GoogleGeminiService to composite service");
+                services.Add(provider.GetRequiredService<GoogleGeminiService>());
+            }
+            
+            // Always add fallback as last resort
+            logger.LogWarning("Adding FallbackLLMService to composite service");
+            services.Add(provider.GetRequiredService<FallbackLLMService>());
+            
+            return new CompositeLLMService(logger, services);
         });
 
-        // Register both implementations
-        services.AddTransient<AzureOpenAIService>();
-        services.AddTransient<FallbackLLMService>();
+        // Use the composite service as the main LLM service
+        services.AddTransient<ILLMService>(provider => provider.GetRequiredService<CompositeLLMService>());
 
         return services;
     }

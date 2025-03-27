@@ -17,17 +17,24 @@ public class FallbackLLMService : ILLMService
 
     public Task<string> CompletePromptAsync(string prompt)
     {
-        _logger.LogWarning("Using fallback LLM service as no API key was provided");
+        _logger.LogWarning("========================================================================================");
+        _logger.LogWarning("USING FALLBACK LLM SERVICE as no API key was provided - this is just simulated AI output");
+        _logger.LogWarning("========================================================================================");
 
         if (prompt.Contains("extract relevant tags"))
         {
-            return Task.FromResult(GenerateRandomTags());
+            var tags = GenerateRandomTags();
+            _logger.LogWarning("FallbackLLMService generated tags: {Tags}", tags);
+            return Task.FromResult(tags);
         }
         else if (prompt.Contains("provide strategic recommendations"))
         {
-            return Task.FromResult(GenerateRandomRecommendations());
+            var recommendations = GenerateRandomRecommendations();
+            _logger.LogWarning("FallbackLLMService generated recommendations: {Recommendations}", recommendations);
+            return Task.FromResult(recommendations);
         }
 
+        _logger.LogWarning("FallbackLLMService returning generic message");
         return Task.FromResult("AI analysis is not available without an API key. Please configure a valid OpenAI API key.");
     }
 

@@ -33,6 +33,9 @@ var host = Host.CreateDefaultBuilder()
         
         // Configure the memory streams provider
         clientBuilder.AddMemoryStreams("MemoryStreams");
+        
+        // Add the Aevatar stream provider to match the Silo configuration
+        clientBuilder.AddMemoryStreams("Aevatar");
     })
     .ConfigureServices((hostContext, services) => 
     {
@@ -117,72 +120,127 @@ static async Task AnalyzeGitHubRepositoryAsync(
 
         // Set up stream subscription for the event types
         var streamProvider = clusterClient.GetStreamProvider("MemoryStreams");
-        var streamId = StreamId.Create("GitHubAnalysisStream", Guid.NewGuid().ToString());
-        var stream = streamProvider.GetStream<SummaryReportEvent>(streamId);
+        
+        Console.WriteLine("Setting up stream subscriptions for summary reports...");
 
-        // Subscribe to the stream
-        var subscription = await stream.SubscribeAsync((summaryEvent, token) =>
-        {
-            Console.WriteLine("\n=============================================");
-            Console.WriteLine($"Summary Report for {summaryEvent.Repository}");
-            Console.WriteLine("=============================================");
-            Console.WriteLine($"Total Issues Analyzed: {summaryEvent.TotalIssuesAnalyzed}");
-            Console.WriteLine($"Generated At: {summaryEvent.GeneratedAt}");
-            
-            Console.WriteLine("\nTag Frequencies:");
-            foreach (var tag in summaryEvent.TagFrequency.OrderByDescending(t => t.Value))
+        // Create a subscription to the static stream with empty GUID for summary reports
+        var summaryStreamId = StreamId.Create("GitHubAnalysisStream", Guid.Empty);
+        Console.WriteLine($"Subscribing to summary stream: GitHubAnalysisStream/{Guid.Empty}");
+        
+        // Subscribe to MemoryStreams first
+        Console.WriteLine("Creating subscription with MemoryStreams provider...");
+        var memoryStreamProvider = clusterClient.GetStreamProvider("MemoryStreams");
+        var memoryStream = memoryStreamProvider.GetStream<SummaryReportEvent>(summaryStreamId);
+        var memorySubscription = await memoryStream.SubscribeAsync(
+            (summaryEvent, token) =>
             {
-                Console.WriteLine($"  - {tag.Key}: {tag.Value}");
-            }
-            
-            Console.WriteLine("\nRecommendations:");
-            foreach (var recommendation in summaryEvent.PriorityRecommendations)
+                Console.WriteLine("\n=============================================");
+                Console.WriteLine($"RECEIVED SUMMARY REPORT FROM MEMORY STREAMS!");
+                Console.WriteLine($"Summary Report for {summaryEvent.Repository}");
+                Console.WriteLine("=============================================");
+                Console.WriteLine($"Total Issues Analyzed: {summaryEvent.TotalIssuesAnalyzed}");
+                Console.WriteLine($"Generated At: {summaryEvent.GeneratedAt}");
+                
+                Console.WriteLine("\nTag Frequencies:");
+                foreach (var tag in summaryEvent.TagFrequency.OrderByDescending(t => t.Value))
+                {
+                    Console.WriteLine($"  - {tag.Key}: {tag.Value}");
+                }
+                
+                Console.WriteLine("\nRecommendations:");
+                foreach (var recommendation in summaryEvent.PriorityRecommendations)
+                {
+                    Console.WriteLine($"  - {recommendation}");
+                }
+                Console.WriteLine("=============================================");
+                
+                return Task.CompletedTask;
+            });
+        Console.WriteLine("Successfully created subscription to summary stream with MemoryStreams");
+        
+        // Also subscribe to Aevatar stream for redundancy
+        Console.WriteLine("Creating subscription with Aevatar provider...");
+        var aevatarProvider = clusterClient.GetStreamProvider("Aevatar");
+        var aevatarStream = aevatarProvider.GetStream<SummaryReportEvent>(summaryStreamId);
+        var aevatarSubscription = await aevatarStream.SubscribeAsync(
+            (summaryEvent, token) =>
             {
-                Console.WriteLine($"  - {recommendation}");
-            }
-            Console.WriteLine("=============================================");
-            
-            return Task.CompletedTask;
-        });
+                Console.WriteLine("\n=============================================");
+                Console.WriteLine($"RECEIVED SUMMARY REPORT FROM AEVATAR STREAMS!");
+                Console.WriteLine($"Summary Report for {summaryEvent.Repository}");
+                Console.WriteLine("=============================================");
+                Console.WriteLine($"Total Issues Analyzed: {summaryEvent.TotalIssuesAnalyzed}");
+                Console.WriteLine($"Generated At: {summaryEvent.GeneratedAt}");
+                
+                Console.WriteLine("\nTag Frequencies:");
+                foreach (var tag in summaryEvent.TagFrequency.OrderByDescending(t => t.Value))
+                {
+                    Console.WriteLine($"  - {tag.Key}: {tag.Value}");
+                }
+                
+                Console.WriteLine("\nRecommendations:");
+                foreach (var recommendation in summaryEvent.PriorityRecommendations)
+                {
+                    Console.WriteLine($"  - {recommendation}");
+                }
+                Console.WriteLine("=============================================");
+                
+                return Task.CompletedTask;
+            });
+        Console.WriteLine("Successfully created subscription to summary stream with Aevatar");
 
-        Console.WriteLine("Listening for summary report events...");
-
-        // Get an instance of the GAgent via the cluster client
-        try 
+        try
         {
-            // Instead of using the GAgent directly, publish events to a well-known stream
-            var publishStream = streamProvider.GetStream<GitHubIssueEvent>("GitHubAnalysisStream", "issues");
+            // Get the stream for publishing issues using the correct namespace and ID
+            var issuesStreamId = StreamId.Create("GitHubAnalysisStream", Guid.Parse("22222222-2222-2222-2222-222222222222"));
+            Console.WriteLine($"Publishing issues to stream: GitHubAnalysisStream/22222222-2222-2222-2222-222222222222");
+            var issuesStream = streamProvider.GetStream<GitHubIssueEvent>(issuesStreamId);
+            
+            // Also add a Aevatar stream subscription for redundancy
+            var aevatarIssuesStream = aevatarProvider.GetStream<GitHubIssueEvent>(issuesStreamId);
             
             // Process each issue
             foreach (var issue in issues)
             {
                 Console.WriteLine($"Publishing issue: {issue.Title}");
                 
-                // Create the event to send to the grain
+                // Create the event to send 
                 var gitHubIssueEvent = new GitHubIssueEvent 
                 { 
                     IssueInfo = issue 
                 };
                 
-                // Publish to the stream instead of calling the grain directly
-                await publishStream.OnNextAsync(gitHubIssueEvent);
+                // Add extra delay to allow the grain to activate and subscribe
+                if (issues.IndexOf(issue) == 0)
+                {
+                    Console.WriteLine("Waiting 2 seconds for grain activation before sending first issue...");
+                    await Task.Delay(2000);
+                }
+                
+                // Publish to both streams for redundancy
+                Console.WriteLine($"Publishing to MemoryStreams provider...");
+                await issuesStream.OnNextAsync(gitHubIssueEvent);
+                
+                Console.WriteLine($"Publishing to Aevatar provider...");
+                await aevatarIssuesStream.OnNextAsync(gitHubIssueEvent);
                 
                 // Small delay to make sure events are processed properly
-                await Task.Delay(100);
+                await Task.Delay(200);  // Increased delay between events
             }
+
+            Console.WriteLine("All issues published for analysis.");
+            Console.WriteLine("Waiting for final results (press Enter to continue)...");
+            Console.ReadLine();
+
+            // Clean up subscriptions
+            await memorySubscription.UnsubscribeAsync();
+            await aevatarSubscription.UnsubscribeAsync();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error: {ex.Message}");
+            Console.WriteLine($"Error publishing issues: {ex.Message}");
             Console.WriteLine($"Stack trace: {ex.StackTrace}");
         }
-
-        Console.WriteLine("All issues published for analysis.");
-        Console.WriteLine("Waiting for final results (press Enter to continue)...");
-        Console.ReadLine();
-
-        // Clean up subscription
-        await subscription.UnsubscribeAsync();
     }
     catch (Exception ex)
     {

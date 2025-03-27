@@ -10,10 +10,13 @@ using Orleans.EventSourcing;
 
 // Configure logging
 Log.Logger = new LoggerConfiguration()
-    .MinimumLevel.Debug()
+    .MinimumLevel.Information()
     .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
+    .MinimumLevel.Override("Orleans", LogEventLevel.Warning)
+    .MinimumLevel.Override("Orleans.Runtime", LogEventLevel.Warning)
+    .MinimumLevel.Override("Orleans.Providers", LogEventLevel.Warning)
     .Enrich.FromLogContext()
-    .WriteTo.Console()
+    .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}")
     .CreateLogger();
 
 var builder = Host.CreateDefaultBuilder(args)
@@ -33,13 +36,18 @@ var builder = Host.CreateDefaultBuilder(args)
             .AddMemoryGrainStorage("PubSubStore")
             .AddMemoryGrainStorage("EventStorage")
             .AddMemoryStreams("MemoryStreams")
+            .AddMemoryStreams("Aevatar")
             .AddLogStorageBasedLogConsistencyProvider()
             .AddStateStorageBasedLogConsistencyProvider()
             .UseDashboard(options => 
             {
                 options.Port = 8888;
             })
-            .ConfigureLogging(logging => logging.AddConsole());
+            .ConfigureLogging(logging => 
+            {
+                logging.AddConsole();
+                logging.SetMinimumLevel(LogLevel.Debug);
+            });
     })
     .ConfigureServices((hostContext, services) =>
     {
