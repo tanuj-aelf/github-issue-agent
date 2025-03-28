@@ -9,6 +9,7 @@ using Orleans.Streams;
 using Serilog;
 using Serilog.Events;
 using System.IO;
+using System.Linq;
 
 // Load .env file if it exists
 string basePath = AppDomain.CurrentDomain.BaseDirectory;
@@ -128,36 +129,61 @@ static async Task AnalyzeGitHubRepositoryAsync(
     IClusterClient clusterClient, 
     GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubClient gitHubClient)
 {
-    Console.Write("Enter GitHub repository owner: ");
-    string owner = Console.ReadLine() ?? "microsoft";
-
-    Console.Write("Enter GitHub repository name: ");
-    string repo = Console.ReadLine() ?? "semantic-kernel";
-
-    Console.Write("Enter maximum number of issues to analyze (default 10): ");
-    if (!int.TryParse(Console.ReadLine(), out int maxIssues))
-    {
-        maxIssues = 10;
-    }
-
-    Console.WriteLine($"\nFetching up to {maxIssues} issues from {owner}/{repo}...");
-
     try
     {
-        // Fetch issues from GitHub
-        var issues = await gitHubClient.GetRepositoryIssuesAsync(owner, repo, maxIssues);
-        
-        Console.WriteLine($"Found {issues.Count} issues. Starting analysis...");
+        Console.Write("Enter GitHub repository owner: ");
+        string owner = Console.ReadLine() ?? "microsoft";
 
-        if (issues.Count == 0)
+        Console.Write("Enter GitHub repository name: ");
+        string repo = Console.ReadLine() ?? "semantic-kernel";
+
+        Console.Write("Enter maximum number of issues to analyze (default 10): ");
+        if (!int.TryParse(Console.ReadLine(), out int maxIssues))
         {
-            Console.WriteLine("No issues found for this repository. Please try another repository or check the repository name.");
+            maxIssues = 10;
+        }
+
+        Console.WriteLine($"\nFetching up to {maxIssues} issues from {owner}/{repo}...");
+
+        // Fetch issues from GitHub with better error handling
+        List<GitHubIssueInfo> issues;
+        try
+        {
+            issues = await gitHubClient.GetRepositoryIssuesAsync(owner, repo, maxIssues);
+            
+            Console.WriteLine($"Found {issues.Count} issues. Starting analysis...");
+
+            if (issues.Count == 0)
+            {
+                Console.WriteLine("\n⚠️ No issues found for this repository. This could be because:");
+                Console.WriteLine(" - The repository doesn't have any open issues");
+                Console.WriteLine(" - All entries might be pull requests rather than issues");
+                Console.WriteLine(" - There might be permission issues accessing the repository");
+                Console.WriteLine("\nPlease try another repository or check the repository name.");
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"\n❌ Error fetching issues: {ex.Message}");
+            Console.WriteLine("Please try another repository or check your connection.");
             return;
         }
 
+        // Display the issues we found to give the user visibility
+        Console.WriteLine("\nIssues found for analysis:");
+        Console.WriteLine("---------------------------");
+        foreach (var issue in issues)
+        {
+            Console.WriteLine($"#{issue.Id}: {issue.Title}");
+            Console.WriteLine($"  Status: {issue.Status}");
+            Console.WriteLine($"  Labels: {string.Join(", ", issue.Labels)}");
+            Console.WriteLine($"  URL: {issue.Url}");
+            Console.WriteLine();
+        }
+        Console.WriteLine("---------------------------\n");
+
         // Set up stream subscription for the event types
-        var streamProvider = clusterClient.GetStreamProvider("MemoryStreams");
-        
         Console.WriteLine("Setting up stream subscriptions for summary reports...");
 
         // Create a subscription to the static stream with empty GUID for summary reports
@@ -188,6 +214,14 @@ static async Task AnalyzeGitHubRepositoryAsync(
                 foreach (var recommendation in summaryEvent.PriorityRecommendations)
                 {
                     Console.WriteLine($"  - {recommendation}");
+                }
+                
+                Console.WriteLine("\nAnalyzed Issues:");
+                foreach (var issue in summaryEvent.AnalyzedIssues)
+                {
+                    Console.WriteLine($"  - #{issue.Id}: {issue.Title}");
+                    Console.WriteLine($"    Tags: {string.Join(", ", issue.Tags)}");
+                    Console.WriteLine($"    URL: {issue.Url}");
                 }
                 Console.WriteLine("=============================================");
                 
@@ -220,6 +254,14 @@ static async Task AnalyzeGitHubRepositoryAsync(
                 {
                     Console.WriteLine($"  - {recommendation}");
                 }
+                
+                Console.WriteLine("\nAnalyzed Issues:");
+                foreach (var issue in summaryEvent.AnalyzedIssues)
+                {
+                    Console.WriteLine($"  - #{issue.Id}: {issue.Title}");
+                    Console.WriteLine($"    Tags: {string.Join(", ", issue.Tags)}");
+                    Console.WriteLine($"    URL: {issue.Url}");
+                }
                 Console.WriteLine("=============================================");
                 
                 return Task.CompletedTask;
@@ -231,15 +273,15 @@ static async Task AnalyzeGitHubRepositoryAsync(
             // Get the stream for publishing issues using the correct namespace and ID
             var issuesStreamId = StreamId.Create("GitHubAnalysisStream", Guid.Parse("22222222-2222-2222-2222-222222222222"));
             Console.WriteLine($"Publishing issues to stream: GitHubAnalysisStream/22222222-2222-2222-2222-222222222222");
-            var issuesStream = streamProvider.GetStream<GitHubIssueEvent>(issuesStreamId);
+            var issuesStream = memoryStreamProvider.GetStream<GitHubIssueEvent>(issuesStreamId);
             
-            // Also add a Aevatar stream subscription for redundancy
-            var aevatarIssuesStream = aevatarProvider.GetStream<GitHubIssueEvent>(issuesStreamId);
+            // Process each issue - we're now just using one stream to avoid duplicate processing
+            Console.WriteLine("\nProcessing issues...");
+            int processedCount = 0;
             
-            // Process each issue
             foreach (var issue in issues)
             {
-                Console.WriteLine($"Publishing issue: {issue.Title}");
+                Console.WriteLine($"Publishing issue: {issue.Title} (#{issue.Id})");
                 
                 // Create the event to send 
                 var gitHubIssueEvent = new GitHubIssueEvent 
@@ -248,40 +290,39 @@ static async Task AnalyzeGitHubRepositoryAsync(
                 };
                 
                 // Add extra delay to allow the grain to activate and subscribe
-                if (issues.IndexOf(issue) == 0)
+                if (issue == issues.First())
                 {
                     Console.WriteLine("Waiting 2 seconds for grain activation before sending first issue...");
                     await Task.Delay(2000);
                 }
                 
-                // Publish to both streams for redundancy
-                Console.WriteLine($"Publishing to MemoryStreams provider...");
-                await issuesStream.OnNextAsync(gitHubIssueEvent);
-                
-                Console.WriteLine($"Publishing to Aevatar provider...");
-                await aevatarIssuesStream.OnNextAsync(gitHubIssueEvent);
-                
-                // Small delay to make sure events are processed properly
-                await Task.Delay(200);  // Increased delay between events
+                try
+                {
+                    Console.WriteLine("Publishing to MemoryStreams provider...");
+                    await issuesStream.OnNextAsync(gitHubIssueEvent);
+                    Console.WriteLine("Successfully published to MemoryStreams");
+                    processedCount++;
+                    
+                    // Add delay between issues to avoid overwhelming the agent
+                    await Task.Delay(1000); 
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error publishing issue: {ex.Message}");
+                }
             }
-
-            Console.WriteLine("All issues published for analysis.");
+            
+            Console.WriteLine($"\nAll issues published for analysis. Successfully processed {processedCount} of {issues.Count} issues.");
             Console.WriteLine("Waiting for final results (press Enter to continue)...");
             Console.ReadLine();
-
-            // Clean up subscriptions
-            await memorySubscription.UnsubscribeAsync();
-            await aevatarSubscription.UnsubscribeAsync();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error publishing issues: {ex.Message}");
-            Console.WriteLine($"Stack trace: {ex.StackTrace}");
+            Console.WriteLine($"Error during stream setup or publishing: {ex.Message}");
         }
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"Error analyzing repository: {ex.Message}");
-        Console.WriteLine($"Stack trace: {ex.StackTrace}");
+        Console.WriteLine($"An unexpected error occurred: {ex.Message}");
     }
 } 

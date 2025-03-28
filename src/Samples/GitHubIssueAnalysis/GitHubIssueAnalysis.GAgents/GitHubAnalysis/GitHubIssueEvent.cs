@@ -20,6 +20,15 @@ public class IssueTagsEvent : EventBase
 }
 
 [GenerateSerializer]
+public class IssueDetails
+{
+    [Id(0)] public required string Id { get; set; }
+    [Id(1)] public required string Title { get; set; }
+    [Id(2)] public List<string> Tags { get; set; } = new();
+    [Id(3)] public string Url { get; set; } = string.Empty;
+}
+
+[GenerateSerializer]
 public class SummaryReportEvent : EventBase
 {
     [Id(0)] public required string Repository { get; set; }
@@ -27,4 +36,5 @@ public class SummaryReportEvent : EventBase
     [Id(2)] public required List<string> PriorityRecommendations { get; set; } = new();
     [Id(3)] public DateTime GeneratedAt { get; set; } = DateTime.UtcNow;
     [Id(4)] public int TotalIssuesAnalyzed { get; set; }
+    [Id(5)] public List<IssueDetails> AnalyzedIssues { get; set; } = new();
 } 

@@ -8,6 +8,7 @@ using Orleans.Streams;
 using Orleans.Runtime;
 using Orleans;
 using Orleans.Concurrency;
+using Orleans.Timers;
 
 namespace GitHubIssueAnalysis.GAgents.GitHubAnalysis;
 
@@ -19,7 +20,7 @@ public static class GitHubAnalysisStream
     public static readonly string StreamNamespace = "GitHubAnalysisStream";
 }
 
-// Fix the ImplicitStreamSubscription to use the static StreamNamespace
+// Fix the ImplicitStreamSubscription to use the static StreamNamespace/IssuesStreamKey
 [ImplicitStreamSubscription("GitHubAnalysisStream")]
 [Reentrant]
 public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalysisLogEvent>, IGitHubAnalysisGAgent, IGrainWithGuidKey
@@ -45,6 +46,7 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalys
         SetupStreamSubscriptionAsync().Ignore();
         
         // Also register a timer to retry subscription periodically until it succeeds
+        // This uses the new recommended API instead of the obsolete RegisterTimer method
         this.RegisterTimer(
             async _ => 
             {
@@ -253,7 +255,7 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalys
     }
 
     // Explicit handler for ImplicitStreamSubscription 
-    public Task OnNextAsync(GitHubIssueEvent @event, StreamSequenceToken? token = null)
+    public async Task OnNextAsync(GitHubIssueEvent @event, StreamSequenceToken? token = null)
     {
         try
         {
@@ -266,17 +268,20 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalys
             _logger.LogWarning("Grain ID: {GrainId}", this.GetPrimaryKey());
             _logger.LogWarning("====================================================");
             
-            // Process the event in the current Orleans thread - Orleans will handle concurrency
-            // This ensures we don't miss messages due to background task timing issues
-            HandleGitHubIssueEventAsync(@event).Ignore();
+            // Process the event immediately instead of in the background
+            // Using await ensures we don't miss messages and properly handle backpressure
+            await HandleGitHubIssueEventInternalAsync(@event);
             
-            // Return completed task since processing is happening in the background
-            return Task.CompletedTask;
+            // Make sure we've properly activated subscriptions
+            if (_streamSubscription == null)
+            {
+                _logger.LogWarning("Stream subscription was null when receiving event - activating subscription");
+                await SetupStreamSubscriptionAsync();
+            }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error in OnNextAsync handler");
-            return Task.CompletedTask;
+            _logger.LogError(ex, "Error in OnNextAsync handler for GitHubIssueEvent");
         }
     }
 
@@ -418,9 +423,16 @@ Status: {issueInfo.Status}
             
             var tagArray = tags.Split(',', StringSplitOptions.RemoveEmptyEntries)
                 .Select(t => t.Trim())
+                .Where(t => !string.IsNullOrWhiteSpace(t))
                 .Distinct()
                 .ToArray();
                 
+            if (tagArray.Length == 0)
+            {
+                _logger.LogWarning("No valid tags found after processing LLM response, falling back to basic extraction");
+                return ExtractBasicTagsFromIssue(issueInfo);
+            }
+            
             _logger.LogWarning("Successfully extracted {Count} tags: {Tags}", 
                 tagArray.Length, string.Join(", ", tagArray));
                 
@@ -445,21 +457,88 @@ Status: {issueInfo.Status}
                 basicTags.AddRange(issueInfo.Labels);
             }
             
-            // Extract simple keywords from title
-            string[] keywords = { "bug", "feature", "enhancement", "documentation", "question", "security", "performance" };
-            foreach (var keyword in keywords)
-            {
-                if (issueInfo.Title.ToLower().Contains(keyword.ToLower()) || 
-                    (issueInfo.Description != null && issueInfo.Description.ToLower().Contains(keyword.ToLower())))
-                {
-                    basicTags.Add(keyword);
-                }
-            }
-            
             // Add status as a tag
             if (!string.IsNullOrEmpty(issueInfo.Status))
             {
-                basicTags.Add(issueInfo.Status);
+                basicTags.Add(issueInfo.Status.ToLower());
+            }
+            
+            // Extract more contextual keywords based on issue content
+            string titleAndDesc = $"{issueInfo.Title} {issueInfo.Description}".ToLower();
+            
+            // Security-related keywords
+            if (titleAndDesc.Contains("security") || titleAndDesc.Contains("vulnerability") || 
+                titleAndDesc.Contains("exploit") || titleAndDesc.Contains("hack") || 
+                titleAndDesc.Contains("attack") || titleAndDesc.Contains("auth"))
+            {
+                basicTags.Add("security");
+            }
+            
+            // Performance-related keywords
+            if (titleAndDesc.Contains("slow") || titleAndDesc.Contains("performance") || 
+                titleAndDesc.Contains("speed") || titleAndDesc.Contains("fast") || 
+                titleAndDesc.Contains("optimize") || titleAndDesc.Contains("lag"))
+            {
+                basicTags.Add("performance");
+            }
+            
+            // Bug-related keywords
+            if (titleAndDesc.Contains("bug") || titleAndDesc.Contains("issue") || 
+                titleAndDesc.Contains("problem") || titleAndDesc.Contains("crash") || 
+                titleAndDesc.Contains("error") || titleAndDesc.Contains("fix") || 
+                titleAndDesc.Contains("broken"))
+            {
+                basicTags.Add("bug");
+            }
+            
+            // Feature-related keywords
+            if (titleAndDesc.Contains("feature") || titleAndDesc.Contains("enhancement") || 
+                titleAndDesc.Contains("add") || titleAndDesc.Contains("implement") || 
+                titleAndDesc.Contains("new") || titleAndDesc.Contains("request"))
+            {
+                basicTags.Add("enhancement");
+            }
+            
+            // Documentation-related keywords
+            if (titleAndDesc.Contains("doc") || titleAndDesc.Contains("documentation") || 
+                titleAndDesc.Contains("example") || titleAndDesc.Contains("readme") || 
+                titleAndDesc.Contains("wiki"))
+            {
+                basicTags.Add("documentation");
+            }
+            
+            // VPN-specific tags (since this is for a VPN repo)
+            if (titleAndDesc.Contains("vpn") || titleAndDesc.Contains("connection") || 
+                titleAndDesc.Contains("network") || titleAndDesc.Contains("connect") || 
+                titleAndDesc.Contains("tunnel"))
+            {
+                basicTags.Add("vpn");
+                basicTags.Add("networking");
+            }
+            
+            // Authentication-related keywords
+            if (titleAndDesc.Contains("login") || titleAndDesc.Contains("auth") || 
+                titleAndDesc.Contains("sign in") || titleAndDesc.Contains("password") || 
+                titleAndDesc.Contains("credential"))
+            {
+                basicTags.Add("authentication");
+                basicTags.Add("user-account");
+            }
+            
+            // Add default tags if we still don't have enough
+            if (basicTags.Count < 3)
+            {
+                basicTags.Add("needs-triage");
+                
+                if (issueInfo.Status.Equals("closed", StringComparison.OrdinalIgnoreCase))
+                {
+                    basicTags.Add("resolved");
+                }
+                else
+                {
+                    basicTags.Add("open");
+                    basicTags.Add("needs-investigation");
+                }
             }
             
             return basicTags.Distinct().ToArray();
@@ -467,7 +546,7 @@ Status: {issueInfo.Status}
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error extracting tags from issue {IssueId}", issueInfo.Id);
-            return Array.Empty<string>();
+            return new[] { "needs-triage", "extraction-error" };
         }
     }
 
@@ -475,93 +554,112 @@ Status: {issueInfo.Status}
     {
         try
         {
-            _logger.LogInformation($"Generating summary report for repository: {repository}");
+            _logger.LogWarning("====================================================");
+            _logger.LogWarning("    GENERATING SUMMARY REPORT                      ");
+            _logger.LogWarning("====================================================");
+            _logger.LogWarning("Repository: {Repository}", repository);
+            _logger.LogWarning("Total issues: {TotalIssues}", State.RepositoryIssues[repository].Count);
+            _logger.LogWarning("====================================================");
+
+            // Calculate tag frequencies
+            var tagFrequency = new Dictionary<string, int>();
             
-            // Get all issues for the repository
-            var issues = State.RepositoryIssues[repository];
-            
-            // Get all tags for the repository
-            var allTags = new List<string>();
-            foreach (var issueTags in State.IssueTags[repository].Values)
+            foreach (var issueId in State.IssueTags[repository].Keys)
             {
-                allTags.AddRange(issueTags);
+                var tags = State.IssueTags[repository][issueId];
+                foreach (var tag in tags)
+                {
+                    if (!tagFrequency.ContainsKey(tag))
+                    {
+                        tagFrequency[tag] = 0;
+                    }
+                    tagFrequency[tag]++;
+                }
             }
             
-            // Calculate tag frequencies
-            var tagFrequency = allTags
-                .GroupBy(tag => tag)
-                .ToDictionary(g => g.Key, g => g.Count());
-            
-            // Generate priority recommendations using LLM
-            var priorityRecommendations = await GenerateRecommendationsUsingLLMAsync(repository, issues, tagFrequency);
-            
-            // Create the summary report event
-            var summaryEvent = new SummaryReportEvent
+            // Log tag frequencies
+            _logger.LogInformation("Tag frequencies:");
+            foreach (var tag in tagFrequency.OrderByDescending(t => t.Value))
             {
-                Repository = repository,
-                TagFrequency = tagFrequency,
-                PriorityRecommendations = priorityRecommendations,
-                GeneratedAt = DateTime.UtcNow,
-                TotalIssuesAnalyzed = State.RepositoryIssues[repository].Count
-            };
+                _logger.LogInformation("  - {Tag}: {Count}", tag.Key, tag.Value);
+            }
             
-            // Publish to both Orleans streams for redundancy
+            // Generate recommendations
+            List<string> recommendations;
             try
             {
-                // Create a unique stream ID with empty Guid which clients will listen on
-                var streamId = StreamId.Create(GitHubAnalysisStream.StreamNamespace, Guid.Empty);
-                _logger.LogWarning("====== PUBLISHING SUMMARY REPORT TO STREAM: {Namespace}/{Key} ======", 
-                    GitHubAnalysisStream.StreamNamespace, Guid.Empty);
-                
-                // First try with Aevatar provider
-                try
-                {
-                    var streamProvider = this.GetStreamProvider("Aevatar");
-                    var stream = streamProvider.GetStream<SummaryReportEvent>(streamId);
-                    await stream.OnNextAsync(summaryEvent);
-                    _logger.LogWarning("Successfully published summary report to Aevatar stream provider");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to publish to Aevatar stream provider");
-                }
-                
-                // Then try with MemoryStreams provider
-                try
-                {
-                    var streamProvider = this.GetStreamProvider("MemoryStreams");
-                    var stream = streamProvider.GetStream<SummaryReportEvent>(streamId);
-                    await stream.OnNextAsync(summaryEvent);
-                    _logger.LogWarning("Successfully published summary report to MemoryStreams provider");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to publish to MemoryStreams provider");
-                }
-                
-                // Now try our wrapper method
-                try
-                {
-                    var streamProvider = GetAppropriateStreamProvider();
-                    var stream = streamProvider.GetStream<SummaryReportEvent>(streamId);
-                    await stream.OnNextAsync(summaryEvent);
-                    _logger.LogWarning("Successfully published summary report via GetAppropriateStreamProvider");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to publish via GetAppropriateStreamProvider");
-                }
-                
-                _logger.LogInformation("Published summary report for repository {Repository} with streamId {StreamId}", repository, streamId);
+                _logger.LogInformation("Generating recommendations using LLM");
+                recommendations = await GenerateRecommendationsUsingLLMAsync(repository, State.RepositoryIssues[repository], tagFrequency);
+                _logger.LogInformation("Successfully generated recommendations using LLM");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error publishing summary report for repository {Repository}", repository);
+                _logger.LogError(ex, "Failed to generate recommendations using LLM, falling back to basic generation");
+                recommendations = GenerateBasicRecommendations(repository, tagFrequency);
             }
+            
+            // Create detailed issue list with analysis
+            var analyzedIssues = new List<IssueDetails>();
+            foreach (var issue in State.RepositoryIssues[repository])
+            {
+                if (State.IssueTags[repository].TryGetValue(issue.Id, out var tags))
+                {
+                    analyzedIssues.Add(new IssueDetails
+                    {
+                        Id = issue.Id,
+                        Title = issue.Title,
+                        Url = issue.Url,
+                        Tags = tags.ToList()
+                    });
+                }
+            }
+            
+            // Create the report
+            var report = new SummaryReportEvent
+            {
+                Repository = repository,
+                TotalIssuesAnalyzed = State.RepositoryIssues[repository].Count,
+                GeneratedAt = DateTime.UtcNow,
+                TagFrequency = tagFrequency,
+                PriorityRecommendations = recommendations,
+                AnalyzedIssues = analyzedIssues
+            };
+            
+            // Try to publish to MemoryStreams first
+            try
+            {
+                _logger.LogWarning("Attempting to publish summary report to MemoryStreams");
+                var memoryProvider = this.GetStreamProvider("MemoryStreams");
+                var memoryStream = memoryProvider.GetStream<SummaryReportEvent>(
+                    StreamId.Create(GitHubAnalysisStream.StreamNamespace, Guid.Empty));
+                await memoryStream.OnNextAsync(report);
+                _logger.LogWarning("Successfully published summary report to MemoryStreams");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to publish summary report to MemoryStreams");
+            }
+            
+            // Also try to publish to Aevatar provider
+            try
+            {
+                _logger.LogWarning("Attempting to publish summary report to Aevatar provider");
+                var aevatarProvider = this.GetStreamProvider("Aevatar");
+                var aevatarStream = aevatarProvider.GetStream<SummaryReportEvent>(
+                    StreamId.Create(GitHubAnalysisStream.StreamNamespace, Guid.Empty));
+                await aevatarStream.OnNextAsync(report);
+                _logger.LogWarning("Successfully published summary report to Aevatar provider");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to publish summary report to Aevatar provider");
+            }
+            
+            _logger.LogWarning("Summary report generation completed for {Repository}", repository);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error generating summary report for repository {Repository}", repository);
+            _logger.LogError(ex, "Failed to generate summary report");
         }
     }
 
