@@ -10,6 +10,8 @@ using Serilog;
 using Serilog.Events;
 using System.IO;
 using System.Linq;
+using System.Collections.Generic;
+using System.Text;
 
 // Load .env file if it exists
 string basePath = AppDomain.CurrentDomain.BaseDirectory;
@@ -142,24 +144,51 @@ static async Task AnalyzeGitHubRepositoryAsync(
         {
             maxIssues = 10;
         }
+        
+        // Add option to select issue state
+        Console.WriteLine("\nSelect which issues to analyze:");
+        Console.WriteLine("1) Open issues only");
+        Console.WriteLine("2) Closed issues only");
+        Console.WriteLine("3) All issues (both open and closed)");
+        Console.Write("Your choice (default 3): ");
+        
+        string issueState = "all";
+        string stateChoice = Console.ReadLine()?.Trim() ?? "3";
+        
+        switch (stateChoice)
+        {
+            case "1":
+                issueState = "open";
+                Console.WriteLine("Analyzing open issues only.");
+                break;
+            case "2":
+                issueState = "closed";
+                Console.WriteLine("Analyzing closed issues only.");
+                break;
+            case "3":
+            default:
+                issueState = "all";
+                Console.WriteLine("Analyzing all issues (both open and closed).");
+                break;
+        }
 
-        Console.WriteLine($"\nFetching up to {maxIssues} issues from {owner}/{repo}...");
+        Console.WriteLine($"\nFetching up to {maxIssues} {issueState} issues from {owner}/{repo}...");
 
         // Fetch issues from GitHub with better error handling
         List<GitHubIssueInfo> issues;
         try
         {
-            issues = await gitHubClient.GetRepositoryIssuesAsync(owner, repo, maxIssues);
+            issues = await gitHubClient.GetRepositoryIssuesAsync(owner, repo, maxIssues, issueState);
             
             Console.WriteLine($"Found {issues.Count} issues. Starting analysis...");
 
             if (issues.Count == 0)
             {
                 Console.WriteLine("\n⚠️ No issues found for this repository. This could be because:");
-                Console.WriteLine(" - The repository doesn't have any open issues");
+                Console.WriteLine(" - The repository doesn't have any issues with state: " + issueState);
                 Console.WriteLine(" - All entries might be pull requests rather than issues");
                 Console.WriteLine(" - There might be permission issues accessing the repository");
-                Console.WriteLine("\nPlease try another repository or check the repository name.");
+                Console.WriteLine("\nPlease try another repository, issue state, or check the repository name.");
                 return;
             }
         }
@@ -197,33 +226,81 @@ static async Task AnalyzeGitHubRepositoryAsync(
         var memorySubscription = await memoryStream.SubscribeAsync(
             (summaryEvent, token) =>
             {
-                Console.WriteLine("\n=============================================");
-                Console.WriteLine($"RECEIVED SUMMARY REPORT FROM MEMORY STREAMS!");
-                Console.WriteLine($"Summary Report for {summaryEvent.Repository}");
-                Console.WriteLine("=============================================");
+                Console.WriteLine("\n===============================================================");
+                Console.WriteLine("              GitHub ISSUE ANALYSIS RESULTS                    ");
+                Console.WriteLine("===============================================================");
+                Console.WriteLine($"Repository: {summaryEvent.Repository}");
                 Console.WriteLine($"Total Issues Analyzed: {summaryEvent.TotalIssuesAnalyzed}");
-                Console.WriteLine($"Generated At: {summaryEvent.GeneratedAt}");
+                Console.WriteLine($"Analysis Completed: {summaryEvent.GeneratedAt.ToString("g")}");
                 
-                Console.WriteLine("\nTag Frequencies:");
-                foreach (var tag in summaryEvent.TagFrequency.OrderByDescending(t => t.Value))
+                Console.WriteLine("\n=== EXTRACTED THEMES ===");
+                Console.WriteLine("The following themes were identified in the repository issues:");
+                
+                // Format tag frequencies into a nice table with percentages
+                var sortedTags = summaryEvent.TagFrequency.OrderByDescending(t => t.Value).ToList();
+                int maxTagWidth = Math.Max(12, sortedTags.Select(t => t.Key.Length).DefaultIfEmpty(0).Max());
+                
+                Console.WriteLine($"\n{"TAG".PadRight(maxTagWidth)} | {"COUNT",-5} | {"PERCENTAGE",-10} | {"GRAPH",-20}");
+                Console.WriteLine(new string('-', maxTagWidth + 42));
+                
+                foreach (var tag in sortedTags)
                 {
-                    Console.WriteLine($"  - {tag.Key}: {tag.Value}");
+                    double percentage = (double)tag.Value / summaryEvent.TotalIssuesAnalyzed * 100;
+                    int barLength = (int)(percentage / 5); // 20 chars = 100%
+                    string bar = new string('█', Math.Min(barLength, 20));
+                    
+                    Console.WriteLine($"{tag.Key.PadRight(maxTagWidth)} | {tag.Value,-5} | {percentage,9:F1}% | {bar}");
                 }
                 
-                Console.WriteLine("\nRecommendations:");
-                foreach (var recommendation in summaryEvent.PriorityRecommendations)
+                Console.WriteLine("\n=== PRIORITY RECOMMENDATIONS ===");
+                Console.WriteLine("Based on the analysis, we recommend focusing on:");
+                
+                for (int i = 0; i < summaryEvent.PriorityRecommendations.Count; i++)
                 {
-                    Console.WriteLine($"  - {recommendation}");
+                    Console.WriteLine($"{i+1}. {summaryEvent.PriorityRecommendations[i]}");
                 }
                 
-                Console.WriteLine("\nAnalyzed Issues:");
+                Console.WriteLine("\n=== ANALYZED ISSUES ===");
+                Console.WriteLine("The following issues were analyzed:");
+                
+                // Group issues by their tags for better insight
+                var issuesByTag = new Dictionary<string, List<IssueDetails>>();
                 foreach (var issue in summaryEvent.AnalyzedIssues)
                 {
-                    Console.WriteLine($"  - #{issue.Id}: {issue.Title}");
-                    Console.WriteLine($"    Tags: {string.Join(", ", issue.Tags)}");
-                    Console.WriteLine($"    URL: {issue.Url}");
+                    foreach (var tag in issue.Tags)
+                    {
+                        if (!issuesByTag.ContainsKey(tag))
+                        {
+                            issuesByTag[tag] = new List<IssueDetails>();
+                        }
+                        issuesByTag[tag].Add(issue);
+                    }
                 }
-                Console.WriteLine("=============================================");
+                
+                // Display top 3 most frequent tags with their issues
+                var topTags = summaryEvent.TagFrequency.OrderByDescending(t => t.Value).Take(3).Select(t => t.Key).ToList();
+                
+                foreach (var tag in topTags)
+                {
+                    if (issuesByTag.ContainsKey(tag))
+                    {
+                        Console.WriteLine($"\nIssues tagged with '{tag}':");
+                        foreach (var issue in issuesByTag[tag].Take(5)) // Show up to 5 issues per tag
+                        {
+                            Console.WriteLine($"  - #{issue.Id}: {issue.Title}");
+                            Console.WriteLine($"    URL: {issue.Url}");
+                        }
+                        
+                        if (issuesByTag[tag].Count > 5)
+                        {
+                            Console.WriteLine($"    ... and {issuesByTag[tag].Count - 5} more");
+                        }
+                    }
+                }
+                
+                Console.WriteLine("\n===============================================================");
+                Console.WriteLine("                     END OF ANALYSIS                          ");
+                Console.WriteLine("===============================================================");
                 
                 return Task.CompletedTask;
             });
@@ -236,33 +313,81 @@ static async Task AnalyzeGitHubRepositoryAsync(
         var aevatarSubscription = await aevatarStream.SubscribeAsync(
             (summaryEvent, token) =>
             {
-                Console.WriteLine("\n=============================================");
-                Console.WriteLine($"RECEIVED SUMMARY REPORT FROM AEVATAR STREAMS!");
-                Console.WriteLine($"Summary Report for {summaryEvent.Repository}");
-                Console.WriteLine("=============================================");
+                Console.WriteLine("\n===============================================================");
+                Console.WriteLine("              GitHub ISSUE ANALYSIS RESULTS                    ");
+                Console.WriteLine("===============================================================");
+                Console.WriteLine($"Repository: {summaryEvent.Repository}");
                 Console.WriteLine($"Total Issues Analyzed: {summaryEvent.TotalIssuesAnalyzed}");
-                Console.WriteLine($"Generated At: {summaryEvent.GeneratedAt}");
+                Console.WriteLine($"Analysis Completed: {summaryEvent.GeneratedAt.ToString("g")}");
                 
-                Console.WriteLine("\nTag Frequencies:");
-                foreach (var tag in summaryEvent.TagFrequency.OrderByDescending(t => t.Value))
+                Console.WriteLine("\n=== EXTRACTED THEMES ===");
+                Console.WriteLine("The following themes were identified in the repository issues:");
+                
+                // Format tag frequencies into a nice table with percentages
+                var sortedTags = summaryEvent.TagFrequency.OrderByDescending(t => t.Value).ToList();
+                int maxTagWidth = Math.Max(12, sortedTags.Select(t => t.Key.Length).DefaultIfEmpty(0).Max());
+                
+                Console.WriteLine($"\n{"TAG".PadRight(maxTagWidth)} | {"COUNT",-5} | {"PERCENTAGE",-10} | {"GRAPH",-20}");
+                Console.WriteLine(new string('-', maxTagWidth + 42));
+                
+                foreach (var tag in sortedTags)
                 {
-                    Console.WriteLine($"  - {tag.Key}: {tag.Value}");
+                    double percentage = (double)tag.Value / summaryEvent.TotalIssuesAnalyzed * 100;
+                    int barLength = (int)(percentage / 5); // 20 chars = 100%
+                    string bar = new string('█', Math.Min(barLength, 20));
+                    
+                    Console.WriteLine($"{tag.Key.PadRight(maxTagWidth)} | {tag.Value,-5} | {percentage,9:F1}% | {bar}");
                 }
                 
-                Console.WriteLine("\nRecommendations:");
-                foreach (var recommendation in summaryEvent.PriorityRecommendations)
+                Console.WriteLine("\n=== PRIORITY RECOMMENDATIONS ===");
+                Console.WriteLine("Based on the analysis, we recommend focusing on:");
+                
+                for (int i = 0; i < summaryEvent.PriorityRecommendations.Count; i++)
                 {
-                    Console.WriteLine($"  - {recommendation}");
+                    Console.WriteLine($"{i+1}. {summaryEvent.PriorityRecommendations[i]}");
                 }
                 
-                Console.WriteLine("\nAnalyzed Issues:");
+                Console.WriteLine("\n=== ANALYZED ISSUES ===");
+                Console.WriteLine("The following issues were analyzed:");
+                
+                // Group issues by their tags for better insight
+                var issuesByTag = new Dictionary<string, List<IssueDetails>>();
                 foreach (var issue in summaryEvent.AnalyzedIssues)
                 {
-                    Console.WriteLine($"  - #{issue.Id}: {issue.Title}");
-                    Console.WriteLine($"    Tags: {string.Join(", ", issue.Tags)}");
-                    Console.WriteLine($"    URL: {issue.Url}");
+                    foreach (var tag in issue.Tags)
+                    {
+                        if (!issuesByTag.ContainsKey(tag))
+                        {
+                            issuesByTag[tag] = new List<IssueDetails>();
+                        }
+                        issuesByTag[tag].Add(issue);
+                    }
                 }
-                Console.WriteLine("=============================================");
+                
+                // Display top 3 most frequent tags with their issues
+                var topTags = summaryEvent.TagFrequency.OrderByDescending(t => t.Value).Take(3).Select(t => t.Key).ToList();
+                
+                foreach (var tag in topTags)
+                {
+                    if (issuesByTag.ContainsKey(tag))
+                    {
+                        Console.WriteLine($"\nIssues tagged with '{tag}':");
+                        foreach (var issue in issuesByTag[tag].Take(5)) // Show up to 5 issues per tag
+                        {
+                            Console.WriteLine($"  - #{issue.Id}: {issue.Title}");
+                            Console.WriteLine($"    URL: {issue.Url}");
+                        }
+                        
+                        if (issuesByTag[tag].Count > 5)
+                        {
+                            Console.WriteLine($"    ... and {issuesByTag[tag].Count - 5} more");
+                        }
+                    }
+                }
+                
+                Console.WriteLine("\n===============================================================");
+                Console.WriteLine("                     END OF ANALYSIS                          ");
+                Console.WriteLine("===============================================================");
                 
                 return Task.CompletedTask;
             });
@@ -303,8 +428,8 @@ static async Task AnalyzeGitHubRepositoryAsync(
                     Console.WriteLine("Successfully published to MemoryStreams");
                     processedCount++;
                     
-                    // Add delay between issues to avoid overwhelming the agent
-                    await Task.Delay(1000); 
+                    // Add delay between issues to avoid overwhelming the agent - increased for better processing
+                    await Task.Delay(1500); 
                 }
                 catch (Exception ex)
                 {
@@ -313,7 +438,25 @@ static async Task AnalyzeGitHubRepositoryAsync(
             }
             
             Console.WriteLine($"\nAll issues published for analysis. Successfully processed {processedCount} of {issues.Count} issues.");
-            Console.WriteLine("Waiting for final results (press Enter to continue)...");
+            
+            // Add a more informative wait message with counter
+            Console.WriteLine("\nWaiting for the analysis to complete...");
+            Console.WriteLine("This may take up to 30 seconds for the LLM to process the data.");
+            
+            // Display a simple progress indicator
+            for (int i = 0; i < 15; i++)
+            {
+                Console.Write(".");
+                await Task.Delay(1000);
+                
+                // Every 5 seconds, give a status update
+                if (i % 5 == 4)
+                {
+                    Console.WriteLine(" Still processing");
+                }
+            }
+            
+            Console.WriteLine("\nAnalysis should be complete. If results aren't displayed above, press Enter to continue...");
             Console.ReadLine();
         }
         catch (Exception ex)

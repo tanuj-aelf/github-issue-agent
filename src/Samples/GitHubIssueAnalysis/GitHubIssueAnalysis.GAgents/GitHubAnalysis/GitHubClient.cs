@@ -1,64 +1,75 @@
 using GitHubIssueAnalysis.GAgents.Common;
-using Octokit;
 using Serilog;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 
 namespace GitHubIssueAnalysis.GAgents.GitHubAnalysis;
 
 public class GitHubClient
 {
-    private readonly Octokit.GitHubClient _client;
+    private readonly HttpClient _httpClient;
+    private readonly string _personalAccessToken;
 
     public GitHubClient(string personalAccessToken)
     {
-        _client = new Octokit.GitHubClient(new ProductHeaderValue("AevatarGitHubAnalyzer"));
+        _personalAccessToken = personalAccessToken;
+        
+        _httpClient = new HttpClient();
+        _httpClient.DefaultRequestHeaders.UserAgent.Add(new System.Net.Http.Headers.ProductInfoHeaderValue("AevatarGitHubAnalyzer", "1.0"));
+        
         if (!string.IsNullOrEmpty(personalAccessToken))
         {
-            _client.Credentials = new Credentials(personalAccessToken);
+            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("token", personalAccessToken);
         }
     }
 
-    public async Task<List<GitHubIssueInfo>> GetRepositoryIssuesAsync(string owner, string repo, int maxIssues = 100)
+    public async Task<List<GitHubIssueInfo>> GetRepositoryIssuesAsync(string owner, string repo, int maxIssues = 100, string issueState = "all")
     {
         try
         {
-            Log.Logger.Information("Starting GitHub issue analysis for {Owner}/{Repo}", owner, repo);
+            Log.Logger.Information("Starting GitHub issue analysis for {Owner}/{Repo} with state filter {State}", owner, repo, issueState);
             
             var issues = new List<GitHubIssueInfo>();
             
             // First check if repository exists
             try 
             {
-                await _client.Repository.Get(owner, repo);
+                var repoResponse = await _httpClient.GetAsync($"https://api.github.com/repos/{owner}/{repo}");
+                if (!repoResponse.IsSuccessStatusCode)
+                {
+                    Log.Logger.Error("Repository {Owner}/{Repo} not found. Status: {Status}", owner, repo, repoResponse.StatusCode);
+                    return issues;
+                }
+                
                 Log.Logger.Information("Repository exists, proceeding with analysis");
             }
-            catch (NotFoundException)
+            catch (Exception ex)
             {
-                Log.Logger.Error("Repository {Owner}/{Repo} not found", owner, repo);
+                Log.Logger.Error(ex, "Error checking repository: {Owner}/{Repo}", owner, repo);
                 return issues;
             }
             
-            // Octokit has issues with overflow exceptions, so we'll use direct API calls
-            // and manually filter the PRs to get real issues
+            // Normalize the state parameter
+            issueState = issueState.ToLowerInvariant();
             
-            // Try to get OPEN issues first (these are the ones we actually want)
-            Log.Logger.Information("Attempting to fetch OPEN issues...");
-            await GetOpenIssuesAsync(owner, repo, issues, maxIssues);
-            
-            // If we need more, try closed issues
-            if (issues.Count < maxIssues)
+            // Validate state parameter
+            if (issueState != "open" && issueState != "closed" && issueState != "all")
             {
-                Log.Logger.Information("Found {Count} open issues, attempting to get closed issues to reach limit of {Max}", 
-                    issues.Count, maxIssues);
-                
-                await GetClosedIssuesAsync(owner, repo, issues, maxIssues);
+                Log.Logger.Warning("Invalid state parameter: {State}, defaulting to 'all'", issueState);
+                issueState = "all";
             }
             
-            // If we still don't have enough, try the one-by-one approach as a last resort
+            // Use direct API calls for everything - no more Octokit!
+            await GetIssuesDirectApiAsync(owner, repo, issues, maxIssues, issueState);
+            
+            // If we still don't have enough issues, try one more method
             if (issues.Count < maxIssues / 2)
             {
                 Log.Logger.Information("Still only have {Count} issues, trying one-by-one approach", issues.Count);
-                await FetchIssuesOneByOneAsync(owner, repo, issues, maxIssues);
+                await FetchIssuesOneByOneAsync(owner, repo, issues, maxIssues, issueState);
             }
             
             Log.Logger.Information("Analysis complete. Got {Count} issues from {Owner}/{Repo}", 
@@ -77,320 +88,105 @@ public class GitHubClient
         }
     }
     
-    private async Task<int> GetOpenIssuesAsync(string owner, string repo, List<GitHubIssueInfo> issues, int maxIssues)
+    private async Task<int> GetIssuesDirectApiAsync(string owner, string repo, List<GitHubIssueInfo> issues, int maxIssues, string state = "all")
     {
-        Log.Logger.Information("Fetching open issues with state filter = {State}", ItemState.Open);
+        Log.Logger.Information("Using direct GitHub API calls to fetch issues with state: {State}", state);
         int fetchedCount = 0;
-
+        int page = 1;
+        int perPage = 30;
+        
         try
         {
-            // Try with the search API first
-            try
+            // Get existing issue IDs to avoid duplicates
+            var existingIds = issues.Select(i => i.Id).ToHashSet();
+            
+            bool hasMorePages = true;
+            while (hasMorePages && fetchedCount < maxIssues)
             {
-                var request = new SearchIssuesRequest
-                {
-                    State = ItemState.Open,
-                    Type = IssueTypeQualifier.Issue,
-                    Repos = new RepositoryCollection { $"{owner}/{repo}" }
-                };
-
-                var searchResults = await _client.Search.SearchIssues(request);
+                // Construct the GitHub API URL
+                string apiUrl = $"https://api.github.com/repos/{owner}/{repo}/issues?state={state}&per_page={perPage}&page={page}&sort=created&direction=desc";
                 
-                foreach (var issue in searchResults.Items.Take(maxIssues))
+                var request = new HttpRequestMessage(HttpMethod.Get, apiUrl);
+                var response = await _httpClient.SendAsync(request);
+                
+                if (!response.IsSuccessStatusCode)
                 {
-                    // Skip if it's a pull request
-                    if (issue.PullRequest != null)
+                    Log.Logger.Error("GitHub API returned error: {StatusCode} - {ReasonPhrase}", 
+                        response.StatusCode, response.ReasonPhrase);
+                    break;
+                }
+                
+                var content = await response.Content.ReadAsStringAsync();
+                var fetchedIssues = JsonSerializer.Deserialize<List<GitHubApiIssue>>(content, new JsonSerializerOptions 
+                { 
+                    PropertyNameCaseInsensitive = true,
+                    NumberHandling = JsonNumberHandling.AllowReadingFromString
+                });
+                
+                if (fetchedIssues == null || fetchedIssues.Count == 0)
+                {
+                    hasMorePages = false;
+                    break;
+                }
+                
+                foreach (var issue in fetchedIssues)
+                {
+                    // Skip if it's a pull request or already in our list
+                    if (issue.PullRequest != null || existingIds.Contains(issue.Number.ToString()))
                         continue;
-
+                    
                     issues.Add(new GitHubIssueInfo
                     {
                         Id = issue.Number.ToString(),
-                        Title = issue.Title,
+                        Title = issue.Title ?? "Untitled Issue",
                         Description = issue.Body ?? string.Empty,
-                        Status = "open",
-                        CreatedAt = issue.CreatedAt.DateTime,
-                        Labels = issue.Labels.Select(l => l.Name).ToArray(),
-                        Url = issue.HtmlUrl,
+                        Status = issue.State ?? "unknown",
+                        CreatedAt = issue.CreatedAt ?? DateTime.UtcNow,
+                        Labels = issue.Labels?.Select(l => l.Name).Where(n => n != null).Select(n => n!).ToArray() ?? Array.Empty<string>(),
+                        Url = issue.HtmlUrl ?? $"https://github.com/{owner}/{repo}/issues/{issue.Number}",
                         Repository = $"{owner}/{repo}"
                     });
                     
+                    existingIds.Add(issue.Number.ToString());
                     fetchedCount++;
                     
                     if (fetchedCount >= maxIssues)
                         break;
                 }
                 
-                Log.Logger.Information("Successfully retrieved {Count} open issues via Search API", fetchedCount);
-                return fetchedCount;
-            }
-            catch (Exception ex)
-            {
-                Log.Logger.Warning(ex, "Error using Search API, falling back to direct API for open issues");
-            }
-
-            // Fallback to direct API if search fails
-            try
-            {
-                var apiOptions = new ApiOptions
+                // Check for next page in the Link header
+                if (response.Headers.TryGetValues("Link", out var linkValues))
                 {
-                    PageSize = 100,
-                    PageCount = 1
-                };
-
-                var request = new RepositoryIssueRequest
+                    string linkHeader = linkValues.FirstOrDefault() ?? "";
+                    hasMorePages = linkHeader.Contains("rel=\"next\"");
+                }
+                else
                 {
-                    State = ItemStateFilter.Open,
-                    Filter = IssueFilter.All,
-                    SortDirection = SortDirection.Descending
-                };
-
-                var openIssues = await _client.Issue.GetAllForRepository(owner, repo, request, apiOptions);
+                    hasMorePages = false;
+                }
                 
-                foreach (var issue in openIssues.Take(maxIssues))
-                {
-                    // Skip if it's a pull request
-                    if (issue.PullRequest != null)
-                        continue;
-
-                    issues.Add(new GitHubIssueInfo
-                    {
-                        Id = issue.Number.ToString(),
-                        Title = issue.Title,
-                        Description = issue.Body ?? string.Empty,
-                        Status = "open",
-                        CreatedAt = issue.CreatedAt.DateTime,
-                        Labels = issue.Labels.Select(l => l.Name).ToArray(),
-                        Url = issue.HtmlUrl,
-                        Repository = $"{owner}/{repo}"
-                    });
-                    
-                    fetchedCount++;
-                    
-                    if (fetchedCount >= maxIssues)
-                        break;
-                }
+                // Move to the next page
+                page++;
             }
-            catch (OverflowException oex)
-            {
-                Log.Logger.Error(oex, "Overflow exception while fetching open issues");
-                
-                // Try one more time with a more restricted request to avoid the overflow
-                try
-                {
-                    Log.Logger.Information("Attempting to fetch open issues with safer parameters");
-                    var request = new RepositoryIssueRequest
-                    {
-                        State = ItemStateFilter.Open,
-                        Filter = IssueFilter.All,
-                        SortDirection = SortDirection.Descending
-                    };
-
-                    // Use the For method without pagination to avoid the overflow
-                    var singleIssueList = await _client.Issue.GetAllForRepository(owner, repo, request);
-                    
-                    // Process only real issues
-                    foreach (var issue in singleIssueList.Where(i => i.PullRequest == null).Take(maxIssues))
-                    {
-                        issues.Add(new GitHubIssueInfo
-                        {
-                            Id = issue.Number.ToString(),
-                            Title = issue.Title,
-                            Description = issue.Body ?? string.Empty,
-                            Status = "open",
-                            CreatedAt = issue.CreatedAt.DateTime,
-                            Labels = issue.Labels.Select(l => l.Name).ToArray(),
-                            Url = issue.HtmlUrl,
-                            Repository = $"{owner}/{repo}"
-                        });
-                        
-                        fetchedCount++;
-                        
-                        if (fetchedCount >= maxIssues)
-                            break;
-                    }
-                }
-                catch (Exception finalEx)
-                {
-                    Log.Logger.Error(finalEx, "Final attempt to fetch open issues failed");
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Logger.Error(ex, "Error fetching open issues with direct API");
-            }
+            
+            Log.Logger.Information("Direct API call completed, found {Count} issues with state: {State}", fetchedCount, state);
+            return fetchedCount;
         }
         catch (Exception ex)
         {
-            Log.Logger.Error(ex, "Unexpected error fetching open issues");
+            Log.Logger.Error(ex, "Error in direct GitHub API call");
+            return fetchedCount;
         }
-
-        return fetchedCount;
-    }
-    
-    private async Task<int> GetClosedIssuesAsync(string owner, string repo, List<GitHubIssueInfo> issues, int maxIssues)
-    {
-        Log.Logger.Information("Fetching closed issues with state filter = {State}", ItemState.Closed);
-        int fetchedCount = 0;
-
-        try
-        {
-            // Try with the search API first
-            try
-            {
-                var request = new SearchIssuesRequest
-                {
-                    State = ItemState.Closed,
-                    Type = IssueTypeQualifier.Issue,
-                    Repos = new RepositoryCollection { $"{owner}/{repo}" }
-                };
-
-                var searchResults = await _client.Search.SearchIssues(request);
-                
-                foreach (var issue in searchResults.Items.Take(maxIssues))
-                {
-                    // Skip if it's a pull request
-                    if (issue.PullRequest != null)
-                        continue;
-
-                    issues.Add(new GitHubIssueInfo
-                    {
-                        Id = issue.Number.ToString(),
-                        Title = issue.Title,
-                        Description = issue.Body ?? string.Empty,
-                        Status = "closed",
-                        CreatedAt = issue.CreatedAt.DateTime,
-                        Labels = issue.Labels.Select(l => l.Name).ToArray(),
-                        Url = issue.HtmlUrl,
-                        Repository = $"{owner}/{repo}"
-                    });
-                    
-                    fetchedCount++;
-                    
-                    if (fetchedCount >= maxIssues)
-                        break;
-                }
-                
-                Log.Logger.Information("Successfully retrieved {Count} closed issues via Search API", fetchedCount);
-                return fetchedCount;
-            }
-            catch (Exception ex)
-            {
-                Log.Logger.Warning(ex, "Error using Search API, falling back to direct API for closed issues");
-            }
-
-            // Fallback to direct API if search fails
-            try
-            {
-                var apiOptions = new ApiOptions
-                {
-                    PageSize = 100,
-                    PageCount = 1
-                };
-
-                var request = new RepositoryIssueRequest
-                {
-                    State = ItemStateFilter.Closed,
-                    Filter = IssueFilter.All,
-                    SortDirection = SortDirection.Descending
-                };
-
-                var closedIssues = await _client.Issue.GetAllForRepository(owner, repo, request, apiOptions);
-                
-                foreach (var issue in closedIssues.Take(maxIssues))
-                {
-                    // Skip if it's a pull request
-                    if (issue.PullRequest != null)
-                        continue;
-
-                    issues.Add(new GitHubIssueInfo
-                    {
-                        Id = issue.Number.ToString(),
-                        Title = issue.Title,
-                        Description = issue.Body ?? string.Empty,
-                        Status = "closed",
-                        CreatedAt = issue.CreatedAt.DateTime,
-                        Labels = issue.Labels.Select(l => l.Name).ToArray(),
-                        Url = issue.HtmlUrl,
-                        Repository = $"{owner}/{repo}"
-                    });
-                    
-                    fetchedCount++;
-                    
-                    if (fetchedCount >= maxIssues)
-                        break;
-                }
-            }
-            catch (OverflowException oex)
-            {
-                Log.Logger.Error(oex, "Overflow exception while fetching closed issues");
-                
-                // Try one more time with a more restricted request to avoid the overflow
-                try
-                {
-                    Log.Logger.Information("Attempting to fetch closed issues with safer parameters");
-                    var request = new RepositoryIssueRequest
-                    {
-                        State = ItemStateFilter.Closed,
-                        Filter = IssueFilter.All,
-                        SortDirection = SortDirection.Descending
-                    };
-
-                    // Use the For method without pagination to avoid the overflow
-                    var singleIssueList = await _client.Issue.GetAllForRepository(owner, repo, request);
-                    
-                    // Process only real issues
-                    foreach (var issue in singleIssueList.Where(i => i.PullRequest == null).Take(maxIssues))
-                    {
-                        issues.Add(new GitHubIssueInfo
-                        {
-                            Id = issue.Number.ToString(),
-                            Title = issue.Title,
-                            Description = issue.Body ?? string.Empty,
-                            Status = "closed",
-                            CreatedAt = issue.CreatedAt.DateTime,
-                            Labels = issue.Labels.Select(l => l.Name).ToArray(),
-                            Url = issue.HtmlUrl,
-                            Repository = $"{owner}/{repo}"
-                        });
-                        
-                        fetchedCount++;
-                        
-                        if (fetchedCount >= maxIssues)
-                            break;
-                    }
-                }
-                catch (Exception finalEx)
-                {
-                    Log.Logger.Error(finalEx, "Final attempt to fetch closed issues failed");
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Logger.Error(ex, "Error fetching closed issues with direct API");
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Logger.Error(ex, "Unexpected error fetching closed issues");
-        }
-
-        return fetchedCount;
     }
 
-    private async Task FetchIssuesOneByOneAsync(string owner, string repo, List<GitHubIssueInfo> issues, int maxIssues)
+    private async Task FetchIssuesOneByOneAsync(string owner, string repo, List<GitHubIssueInfo> issues, int maxIssues, string state = "all")
     {
         try
         {
             Log.Logger.Information("Resorting to fetching issues one-by-one (last resort)");
             
-            // We'll try issues with different number ranges to maximize our chances
-            // of finding actual issues, not just PRs
-            
             // Get list of existing issue IDs to avoid duplicates
             var existingIds = issues.Select(i => i.Id).ToHashSet();
-            
-            // The usual approach is to check sequential IDs, but that's inefficient.
-            // Let's try a smarter approach:
             
             // Step 1: Try to get the latest issue number to estimate the repository size
             int latestIssueNumber = await GetLatestIssueNumberAsync(owner, repo);
@@ -449,8 +245,21 @@ public class GitHubClient
                 
                 try
                 {
-                    var issue = await _client.Issue.Get(owner, repo, issueNumber);
+                    var response = await _httpClient.GetAsync($"https://api.github.com/repos/{owner}/{repo}/issues/{issueNumber}");
                     
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        // Issue number doesn't exist
+                        continue;
+                    }
+                    
+                    var content = await response.Content.ReadAsStringAsync();
+                    var issue = JsonSerializer.Deserialize<GitHubApiIssue>(content, 
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                        
+                    if (issue == null)
+                        continue;
+                        
                     // Skip PRs
                     if (issue.PullRequest != null)
                     {
@@ -458,11 +267,11 @@ public class GitHubClient
                         continue;
                     }
                     
-                    // Always prefer open issues
-                    if (issue.State.Value == ItemState.Closed && issues.Count > maxIssues / 2)
+                    // If issue doesn't match the requested state, skip it
+                    if (state != "all" && issue.State?.ToLowerInvariant() != state.ToLowerInvariant())
                     {
-                        // Skip closed issues if we already have enough
-                        Log.Logger.Debug("Skipping closed issue #{Number} as we already have enough issues", issue.Number);
+                        Log.Logger.Debug("Skipping issue #{Number} with state {State} as it doesn't match requested state {RequestedState}", 
+                            issue.Number, issue.State, state);
                         continue;
                     }
                     
@@ -471,11 +280,11 @@ public class GitHubClient
                         Id = issue.Number.ToString(),
                         Title = issue.Title ?? "Untitled Issue",
                         Description = issue.Body ?? string.Empty,
-                        Labels = issue.Labels?.Select(l => l.Name)?.ToArray() ?? Array.Empty<string>(),
+                        Labels = issue.Labels?.Select(l => l.Name).Where(n => n != null).Select(n => n!).ToArray() ?? Array.Empty<string>(),
                         Url = issue.HtmlUrl ?? $"https://github.com/{owner}/{repo}/issues/{issue.Number}",
                         Repository = $"{owner}/{repo}",
-                        CreatedAt = issue.CreatedAt.DateTime,
-                        Status = issue.State.StringValue
+                        CreatedAt = issue.CreatedAt ?? DateTime.UtcNow,
+                        Status = issue.State ?? "unknown"
                     };
                     
                     issues.Add(issueInfo);
@@ -485,38 +294,24 @@ public class GitHubClient
                     if (issue.Labels?.Count > 0)
                     {
                         Log.Logger.Information("Issue #{Number} ({Status}) has {Count} labels: {Labels}", 
-                            issue.Number, issue.State.StringValue, issue.Labels.Count, 
+                            issue.Number, issue.State, issue.Labels.Count, 
                             string.Join(", ", issue.Labels.Select(l => l.Name)));
                     }
                     else
                     {
                         Log.Logger.Information("Issue #{Number} ({Status}) has no labels", 
-                            issue.Number, issue.State.StringValue);
+                            issue.Number, issue.State);
                     }
                     
                     Log.Logger.Information("Found individual issue #{Number}: {Title} ({Status})", 
-                        issue.Number, issue.Title, issue.State.StringValue);
+                        issue.Number, issue.Title, issue.State);
                     
                     if (issues.Count >= maxIssues)
                         break;
                 }
-                catch (NotFoundException)
-                {
-                    // Issue number doesn't exist, skip silently
-                }
                 catch (Exception ex)
                 {
-                    if (ex is OverflowException || 
-                        ex.InnerException is OverflowException || 
-                        ex.Message.Contains("Overflow") || 
-                        (ex.InnerException?.Message?.Contains("Overflow") ?? false))
-                    {
-                        Log.Logger.Debug("Overflow error for issue #{Number}, skipping", issueNumber);
-                    }
-                    else
-                    {
-                        Log.Logger.Error(ex, "Error fetching issue #{Number}", issueNumber);
-                    }
+                    Log.Logger.Error(ex, "Error fetching issue #{Number}", issueNumber);
                 }
             }
             
@@ -532,14 +327,25 @@ public class GitHubClient
     {
         try
         {
-            // Try to get the latest issue or PR to determine the rough number range
-            var latest = await _client.Issue.GetAllForRepository(owner, repo, new RepositoryIssueRequest
-            {
-                State = ItemStateFilter.All,
-                SortDirection = SortDirection.Descending
-            }, new ApiOptions { PageSize = 1, PageCount = 1 });
+            // Try to get the latest issue to determine the rough number range
+            var response = await _httpClient.GetAsync($"https://api.github.com/repos/{owner}/{repo}/issues?per_page=1&state=all");
             
-            return latest.FirstOrDefault()?.Number ?? 50; // Default to 50 if nothing found
+            if (!response.IsSuccessStatusCode)
+                return 50; // Default if we can't get issues
+                
+            var content = await response.Content.ReadAsStringAsync();
+            var issues = JsonSerializer.Deserialize<List<GitHubApiIssue>>(content, 
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                
+            // Explicitly cast the long to int, or use a reasonable default if too large
+            var latestIssueNumber = issues?.FirstOrDefault()?.Number ?? 0;
+            if (latestIssueNumber > int.MaxValue)
+            {
+                Log.Logger.Warning("Issue number {Number} exceeds int.MaxValue, using 1000 as a default", latestIssueNumber);
+                return 1000; // Use a reasonable default
+            }
+            
+            return (int)latestIssueNumber; // Explicit cast
         }
         catch
         {
@@ -552,8 +358,20 @@ public class GitHubClient
     {
         try
         {
-            var issue = await _client.Issue.Get(owner, repo, issueNumber);
+            var response = await _httpClient.GetAsync($"https://api.github.com/repos/{owner}/{repo}/issues/{issueNumber}");
             
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new Exception($"Issue #{issueNumber} not found or access denied. Status: {response.StatusCode}");
+            }
+            
+            var content = await response.Content.ReadAsStringAsync();
+            var issue = JsonSerializer.Deserialize<GitHubApiIssue>(content, 
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                
+            if (issue == null)
+                throw new Exception($"Failed to parse issue data for #{issueNumber}");
+                
             // Verify this is not a PR
             if (issue.PullRequest != null)
             {
@@ -565,11 +383,11 @@ public class GitHubClient
                 Id = issue.Number.ToString(),
                 Title = issue.Title ?? "Untitled Issue",
                 Description = issue.Body ?? string.Empty,
-                Labels = issue.Labels?.Select(l => l.Name)?.ToArray() ?? Array.Empty<string>(),
+                Labels = issue.Labels?.Select(l => l.Name).Where(n => n != null).Select(n => n!).ToArray() ?? Array.Empty<string>(),
                 Url = issue.HtmlUrl ?? $"https://github.com/{owner}/{repo}/issues/{issue.Number}",
                 Repository = $"{owner}/{repo}",
-                CreatedAt = issue.CreatedAt.DateTime,
-                Status = issue.State.StringValue
+                CreatedAt = issue.CreatedAt ?? DateTime.UtcNow,
+                Status = issue.State ?? "unknown"
             };
         }
         catch (Exception ex)
@@ -579,55 +397,31 @@ public class GitHubClient
         }
     }
 
-    public async Task<List<GitHubIssueInfo>> FetchIssuesAsync(string owner, string repo, int maxIssues)
+    public async Task<List<GitHubIssueInfo>> FetchIssuesAsync(string owner, string repo, int maxIssues, string state = "all")
     {
-        try
-        {
-            // Input validation
-            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo))
-            {
-                Log.Logger.Error("Invalid owner or repository name");
-                return new List<GitHubIssueInfo>();
-            }
+        return await GetRepositoryIssuesAsync(owner, repo, maxIssues, state);
+    }
 
-            // Check if the repository exists
-            try
-            {
-                await _client.Repository.Get(owner, repo);
-                Log.Logger.Information("Repository exists, proceeding with analysis");
-            }
-            catch (NotFoundException)
-            {
-                Log.Logger.Error("Repository {Owner}/{Repo} not found", owner, repo);
-                return new List<GitHubIssueInfo>();
-            }
-            catch (Exception ex)
-            {
-                Log.Logger.Error(ex, "Error checking repository existence");
-                return new List<GitHubIssueInfo>();
-            }
-
-            var issues = new List<GitHubIssueInfo>();
-
-            // First try to get open issues
-            Log.Logger.Information("Attempting to fetch OPEN issues...");
-            int openIssuesCount = await GetOpenIssuesAsync(owner, repo, issues, maxIssues);
-            
-            // If we didn't get enough issues, try to get closed issues as well
-            if (openIssuesCount < maxIssues)
-            {
-                int remainingIssues = maxIssues - openIssuesCount;
-                Log.Logger.Information("Found {Count} open issues, attempting to get closed issues to reach limit of {Max}", openIssuesCount, maxIssues);
-                await GetClosedIssuesAsync(owner, repo, issues, remainingIssues);
-            }
-
-            Log.Logger.Information("Analysis complete. Got {Count} issues from {Owner}/{Repo}", issues.Count, owner, repo);
-            return issues;
-        }
-        catch (Exception ex)
-        {
-            Log.Logger.Error(ex, "Error fetching issues for {Owner}/{Repo}", owner, repo);
-            return new List<GitHubIssueInfo>();
-        }
+    // Model classes for direct GitHub API parsing
+    private class GitHubApiIssue
+    {
+        public long Number { get; set; }
+        public string? Title { get; set; }
+        public string? Body { get; set; }
+        public string? State { get; set; }
+        public DateTime? CreatedAt { get; set; }
+        public List<GitHubApiLabel>? Labels { get; set; }
+        public string? HtmlUrl { get; set; }
+        public GitHubApiPullRequest? PullRequest { get; set; }
+    }
+    
+    private class GitHubApiLabel
+    {
+        public string? Name { get; set; }
+    }
+    
+    private class GitHubApiPullRequest
+    {
+        public string? Url { get; set; }
     }
 } 

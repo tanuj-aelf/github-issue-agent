@@ -9,27 +9,27 @@ using Orleans.Runtime;
 using Orleans;
 using Orleans.Concurrency;
 using Orleans.Timers;
+using Orleans.Runtime.Scheduler;
+using System.Linq;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using System.Text.RegularExpressions;
+using System;
+using GitHubIssueAnalysis.GAgents.GrainInterfaces.Models;
 
 namespace GitHubIssueAnalysis.GAgents.GitHubAnalysis;
 
-// Static helper for stream names and IDs
-public static class GitHubAnalysisStream
-{
-    public static readonly Guid TagsStreamKey = Guid.Parse("11111111-1111-1111-1111-111111111111");
-    public static readonly Guid IssuesStreamKey = Guid.Parse("22222222-2222-2222-2222-222222222222");
-    public static readonly string StreamNamespace = "GitHubAnalysisStream";
-}
-
-// Fix the ImplicitStreamSubscription to use the static StreamNamespace/IssuesStreamKey
-[ImplicitStreamSubscription("GitHubAnalysisStream")]
+// Fix the ImplicitStreamSubscription to use the static StreamNamespace
+[ImplicitStreamSubscription(GitHubAnalysisStream.StreamNamespace)]
 [Reentrant]
-public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalysisLogEvent>, IGitHubAnalysisGAgent, IGrainWithGuidKey
+public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisGAgentState, GitHubAnalysisLogEvent>, IGitHubAnalysisGAgent, IGrainWithGuidKey
 {
     private readonly ILogger<GitHubAnalysisGAgent> _logger;
     private readonly ILLMService _llmService;
     
     // Use the correct type for stream subscription handle
     private StreamSubscriptionHandle<GitHubIssueEvent>? _streamSubscription;
+    private IDisposable? _timer;
     
     // Constructor with improved stream subscription
     public GitHubAnalysisGAgent(
@@ -45,38 +45,39 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalys
         // Immediate subscription attempt with no timer
         SetupStreamSubscriptionAsync().Ignore();
         
-        // Also register a timer to retry subscription periodically until it succeeds
-        // This uses the new recommended API instead of the obsolete RegisterTimer method
-        this.RegisterTimer(
-            async _ => 
-            {
-                if (_streamSubscription == null)
-                {
-                    _logger.LogWarning("Retrying stream subscription from timer...");
-                    await SetupStreamSubscriptionAsync();
-                    return;
-                }
-                
-                // Check if subscription is still active
-                try
-                {
-                    var streamProvider = GetAppropriateStreamProvider();
-                    var stream = streamProvider.GetStream<GitHubIssueEvent>(
-                        StreamId.Create(GitHubAnalysisStream.StreamNamespace, GitHubAnalysisStream.IssuesStreamKey));
-                    
-                    // If we have a subscription but lost connection, reconnect
-                    _logger.LogInformation("Checking subscription status from timer...");
-                }
-                catch
-                {
-                    // If any errors, try to resubscribe
-                    _logger.LogWarning("Error checking subscription status, attempting to resubscribe...");
-                    await SetupStreamSubscriptionAsync();
-                }
-            },
+        // Initialize a timer the simple way, avoiding the obsolete API
+        _timer = RegisterTimer(
+            CheckSubscription,
             null,
             TimeSpan.FromSeconds(1),  // Start after 1 second
             TimeSpan.FromSeconds(5)); // Check every 5 seconds
+    }
+    
+    private async Task CheckSubscription(object _)
+    {
+        if (_streamSubscription == null)
+        {
+            _logger.LogWarning("Retrying stream subscription from timer...");
+            await SetupStreamSubscriptionAsync();
+            return;
+        }
+        
+        // Check if subscription is still active
+        try
+        {
+            var streamProvider = GetAppropriateStreamProvider();
+            var stream = streamProvider.GetStream<GitHubIssueEvent>(
+                StreamId.Create(GitHubAnalysisStream.StreamNamespace, GitHubAnalysisStream.TagsStreamKey));
+            
+            // If we have a subscription but lost connection, reconnect
+            _logger.LogInformation("Checking subscription status from timer...");
+        }
+        catch
+        {
+            // If any errors, try to resubscribe
+            _logger.LogWarning("Error checking subscription status, attempting to resubscribe...");
+            await SetupStreamSubscriptionAsync();
+        }
     }
     
     // Updated to handle stream subscription setup with retry logic
@@ -127,9 +128,9 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalys
             if (streamProvider != null)
             {
                 // Subscribe to the main issues stream
-                var issuesStreamId = StreamId.Create(GitHubAnalysisStream.StreamNamespace, GitHubAnalysisStream.IssuesStreamKey);
+                var issuesStreamId = StreamId.Create(GitHubAnalysisStream.StreamNamespace, GitHubAnalysisStream.TagsStreamKey);
                 _logger.LogWarning("====== SUBSCRIBING TO ISSUES STREAM: {Namespace}/{Key} ======", 
-                    GitHubAnalysisStream.StreamNamespace, GitHubAnalysisStream.IssuesStreamKey);
+                    GitHubAnalysisStream.StreamNamespace, GitHubAnalysisStream.TagsStreamKey);
                 
                 var issuesStream = streamProvider.GetStream<GitHubIssueEvent>(issuesStreamId);
                 _streamSubscription = await issuesStream.SubscribeAsync(this);
@@ -154,11 +155,11 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalys
                 // Also try to subscribe to the summary stream for debugging
                 try 
                 {
-                    var summaryStreamId = StreamId.Create(GitHubAnalysisStream.StreamNamespace, Guid.Empty);
+                    var summaryStreamId = StreamId.Create(GitHubAnalysisStream.StreamNamespace, GitHubAnalysisStream.SummaryStreamKey);
                     _logger.LogWarning("====== SUBSCRIBING TO SUMMARY STREAM: {Namespace}/{Key} ======", 
-                        GitHubAnalysisStream.StreamNamespace, Guid.Empty);
+                        GitHubAnalysisStream.StreamNamespace, GitHubAnalysisStream.SummaryStreamKey);
                     
-                    var summaryStream = streamProvider.GetStream<SummaryReportEvent>(summaryStreamId);
+                    var summaryStream = streamProvider.GetStream<RepositorySummaryReport>(summaryStreamId);
                     await summaryStream.SubscribeAsync(new SummaryStreamObserver(_logger));
                     _logger.LogWarning("====== SUCCESSFULLY SUBSCRIBED TO SUMMARY STREAM ======");
                 }
@@ -188,7 +189,37 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalys
         
         public Task OnNextAsync(IssueTagsEvent item, StreamSequenceToken? token = null)
         {
-            _logger.LogWarning("Received tags event for issue: {IssueId}", item.IssueId);
+            try
+            {
+                _logger.LogWarning("Received tags event for issue: {IssueId}", item.IssueId);
+                
+                Console.WriteLine("\n========== RECEIVED TAGS EVENT ==========");
+                Console.WriteLine($"Repository: {item.Repository}");
+                Console.WriteLine($"Issue: #{item.IssueId} - {item.Title}");
+                Console.WriteLine($"Extraction Time: {DateTime.UtcNow}");
+                
+                Console.WriteLine("\nEXTRACTED TAGS:");
+                if (item.ExtractedTags != null && item.ExtractedTags.Length > 0)
+                {
+                    foreach (var tag in item.ExtractedTags)
+                    {
+                        Console.WriteLine($"  - {tag}");
+                    }
+                    Console.WriteLine($"\nTotal Tags: {item.ExtractedTags.Length}");
+                }
+                else
+                {
+                    Console.WriteLine("  No tags extracted");
+                }
+                
+                Console.WriteLine("========== END OF TAGS EVENT ==========\n");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"ERROR in TagsStreamObserver: {ex.Message}");
+                _logger.LogError(ex, "Error processing tags event in stream observer");
+            }
+            
             return Task.CompletedTask;
         }
         
@@ -206,7 +237,7 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalys
     }
     
     // Helper class to observe summary stream events
-    private class SummaryStreamObserver : IAsyncObserver<SummaryReportEvent>
+    private class SummaryStreamObserver : IAsyncObserver<RepositorySummaryReport>
     {
         private readonly Microsoft.Extensions.Logging.ILogger _logger;
         
@@ -215,15 +246,83 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalys
             _logger = logger;
         }
         
-        public Task OnNextAsync(SummaryReportEvent item, StreamSequenceToken? token = null)
+        public Task OnNextAsync(RepositorySummaryReport item, StreamSequenceToken? token = null)
         {
-            _logger.LogWarning("====================================================");
-            _logger.LogWarning("    RECEIVED SUMMARY EVENT FROM STREAM              ");
-            _logger.LogWarning("====================================================");
-            _logger.LogWarning("Repository: {Repository}", item.Repository);
-            _logger.LogWarning("Total Issues: {TotalIssues}", item.TotalIssuesAnalyzed);
-            _logger.LogWarning("Stream Token: {Token}", token);
-            _logger.LogWarning("====================================================");
+            try
+            {
+                _logger.LogWarning("====================================================");
+                _logger.LogWarning("    RECEIVED SUMMARY REPORT FROM STREAM            ");
+                _logger.LogWarning("====================================================");
+                _logger.LogWarning("Repository: {Repository}", item.Repository);
+                _logger.LogWarning("Total Issues: {TotalIssues}", item.TotalIssues);
+                _logger.LogWarning("Open Issues: {OpenIssues}", item.OpenIssues);
+                _logger.LogWarning("Closed Issues: {ClosedIssues}", item.ClosedIssues);
+                _logger.LogWarning("Generated At: {GeneratedAt}", item.GeneratedAt);
+                _logger.LogWarning("Stream Token: {Token}", token);
+                _logger.LogWarning("====================================================");
+                
+                // Console display for the client
+                Console.WriteLine("\n\n========== RECEIVED REPOSITORY ANALYSIS ==========");
+                Console.WriteLine($"Repository: {item.Repository}");
+                Console.WriteLine($"Total Issues: {item.TotalIssues} ({item.OpenIssues} open, {item.ClosedIssues} closed)");
+                Console.WriteLine($"Generated: {item.GeneratedAt}");
+                
+                Console.WriteLine("\nTOP TAGS:");
+                if (item.TopTags != null && item.TopTags.Length > 0)
+                {
+                    foreach (var tag in item.TopTags)
+                    {
+                        Console.WriteLine($"  - {tag.Tag}: {tag.Count} issue(s)");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("  No tags found");
+                }
+                
+                Console.WriteLine("\nRECOMMENDATIONS:");
+                if (item.Recommendations != null && item.Recommendations.Length > 0)
+                {
+                    foreach (var rec in item.Recommendations)
+                    {
+                        Console.WriteLine($"\n* {rec.Title} (Priority: {rec.Priority})");
+                        if (rec.SupportingIssues != null && rec.SupportingIssues.Length > 0)
+                        {
+                            Console.WriteLine($"  Supporting Issues: {string.Join(", ", rec.SupportingIssues.Select(i => $"#{i}"))}");
+                        }
+                        else
+                        {
+                            Console.WriteLine("  Supporting Issues: None specified");
+                        }
+                        Console.WriteLine($"  {rec.Description}");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("  No recommendations generated");
+                }
+                
+                Console.WriteLine("\nISSUE ACTIVITY:");
+                if (item.TimeRanges != null && item.TimeRanges.Length > 0)
+                {
+                    foreach (var range in item.TimeRanges)
+                    {
+                        Console.WriteLine($"  {range.StartDate:yyyy-MM-dd} to {range.EndDate:yyyy-MM-dd}: {range.IssuesCreated} created, {range.IssuesClosed} closed");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("  No activity data available");
+                }
+                
+                Console.WriteLine("\n========== END OF REPOSITORY ANALYSIS ==========\n");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"ERROR in SummaryStreamObserver: {ex.Message}");
+                _logger.LogError(ex, "Error processing summary report in stream observer");
+            }
+            
             return Task.CompletedTask;
         }
         
@@ -243,14 +342,25 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalys
     // Remove the override and create a helper method instead
     private IStreamProvider GetAppropriateStreamProvider()
     {
+        // Try to get the preferred stream provider, with fallback options
         try
         {
+            _logger.LogInformation("Attempting to get the primary stream provider");
             return this.GetStreamProvider("Aevatar");
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Could not get 'Aevatar' stream provider, falling back to 'MemoryStreams'");
-            return this.GetStreamProvider("MemoryStreams");
+            _logger.LogWarning(ex, "Failed to get Aevatar stream provider, falling back to MemoryStreams");
+            
+            try
+            {
+                return this.GetStreamProvider("MemoryStreams");
+            }
+            catch (Exception innerEx)
+            {
+                _logger.LogError(innerEx, "Failed to get MemoryStreams provider, using default Orleans.Streams.MemoryStream");
+                return this.GetStreamProvider("Orleans.Streams.MemoryStream");
+            }
         }
     }
 
@@ -259,6 +369,16 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalys
     {
         try
         {
+            Console.WriteLine("\n\n********************************************************************");
+            Console.WriteLine("*                   RECEIVED GITHUB ISSUE EVENT                     *");
+            Console.WriteLine("********************************************************************");
+            Console.WriteLine($"REPOSITORY: {@event.IssueInfo.Repository}");
+            Console.WriteLine($"ISSUE: #{@event.IssueInfo.Id} - {@event.IssueInfo.Title}");
+            Console.WriteLine($"STATUS: {@event.IssueInfo.Status}");
+            Console.WriteLine($"RECEIVED AT: {DateTime.UtcNow}");
+            Console.WriteLine($"GRAIN ID: {this.GetPrimaryKey()}");
+            Console.WriteLine("********************************************************************");
+            
             _logger.LogWarning("====================================================");
             _logger.LogWarning("    RECEIVED EVENT FROM STREAM                     ");
             _logger.LogWarning("====================================================");
@@ -268,19 +388,43 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalys
             _logger.LogWarning("Grain ID: {GrainId}", this.GetPrimaryKey());
             _logger.LogWarning("====================================================");
             
-            // Process the event immediately instead of in the background
-            // Using await ensures we don't miss messages and properly handle backpressure
+            // Process the event immediately
+            Console.WriteLine("\nBEGINNING ISSUE ANALYSIS - THIS MAY TAKE UP TO 30 SECONDS\n");
             await HandleGitHubIssueEventInternalAsync(@event);
             
-            // Make sure we've properly activated subscriptions
-            if (_streamSubscription == null)
+            // Force summary generation after each event for immediate feedback
+            try
             {
-                _logger.LogWarning("Stream subscription was null when receiving event - activating subscription");
-                await SetupStreamSubscriptionAsync();
+                string repository = @event.IssueInfo.Repository;
+                Console.WriteLine("\nFORCING SUMMARY GENERATION FOR IMMEDIATE FEEDBACK...");
+                _logger.LogWarning("Forcing summary generation after receiving event for repository: {Repository}", repository);
+                
+                // Wait a moment to ensure tags have been processed
+                await Task.Delay(1000);
+                
+                // Generate summary report
+                await GenerateSummaryReportAsync(repository);
+                
+                Console.WriteLine("\nSUMMARY REPORT GENERATED AND PUBLISHED TO STREAM\n");
+                _logger.LogWarning("Summary report generated and should be published to stream");
+                
+                // Output clear completion message
+                Console.WriteLine("\n********************************************************************");
+                Console.WriteLine("*               COMPLETED GITHUB ISSUE ANALYSIS                    *");
+                Console.WriteLine("*                                                                  *");
+                Console.WriteLine("*        Results have been published to the summary stream         *");
+                Console.WriteLine("*     You should see the detailed analysis output above/below      *");
+                Console.WriteLine("********************************************************************\n");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"\nERROR IN SUMMARY GENERATION: {ex.Message}");
+                _logger.LogError(ex, "Error generating forced summary after event processing");
             }
         }
         catch (Exception ex)
         {
+            Console.WriteLine($"\nCRITICAL ERROR IN EVENT HANDLER: {ex.Message}");
             _logger.LogError(ex, "Error in OnNextAsync handler for GitHubIssueEvent");
         }
     }
@@ -310,115 +454,241 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisState, GitHubAnalys
     {
         try
         {
+            Console.WriteLine($"\n\n======== PROCESSING GITHUB ISSUE EVENT ========");
+            Console.WriteLine($"Repository: {@event.IssueInfo.Repository}");
+            Console.WriteLine($"Issue: #{@event.IssueInfo.Id} - {@event.IssueInfo.Title}");
+            Console.WriteLine($"Status: {@event.IssueInfo.Status}");
+            
             _logger.LogInformation($"{nameof(GitHubAnalysisGAgent)} received {nameof(GitHubIssueEvent)} for repository: {@event.IssueInfo.Repository}");
 
             var issueInfo = @event.IssueInfo;
             
-            // Store issue in state
-            if (!State.RepositoryIssues.ContainsKey(issueInfo.Repository))
+            // Convert to our model type if needed
+            Console.WriteLine("\nConverting issue to model...");
+            GrainInterfaces.Models.GitHubIssueInfo modelIssueInfo = new GrainInterfaces.Models.GitHubIssueInfo
             {
-                State.RepositoryIssues[issueInfo.Repository] = new List<GitHubIssueInfo>();
+                Id = issueInfo.Id,
+                Title = issueInfo.Title,
+                Description = issueInfo.Description,
+                Status = issueInfo.Status,
+                State = issueInfo.Status,
+                Url = issueInfo.Url,
+                Repository = issueInfo.Repository,
+                CreatedAt = issueInfo.CreatedAt,
+                UpdatedAt = DateTime.UtcNow,
+                ClosedAt = issueInfo.Status?.ToLower() == "closed" ? (DateTime?)DateTime.UtcNow : null,
+                Labels = issueInfo.Labels
+            };
+            
+            // Store issue in state
+            Console.WriteLine("\nStoring issue in state...");
+            if (!State.RepositoryIssues.ContainsKey(modelIssueInfo.Repository))
+            {
+                Console.WriteLine($"Creating new repository entry for {modelIssueInfo.Repository}");
+                _logger.LogInformation("Creating new repository entry for {Repository}", modelIssueInfo.Repository);
+                State.RepositoryIssues[modelIssueInfo.Repository] = new List<GrainInterfaces.Models.GitHubIssueInfo>();
             }
             
-            State.RepositoryIssues[issueInfo.Repository].Add(issueInfo);
+            // Check if we already have this issue to avoid duplicates
+            if (!State.RepositoryIssues[modelIssueInfo.Repository].Any(i => i.Id == modelIssueInfo.Id))
+            {
+                Console.WriteLine($"Adding new issue #{modelIssueInfo.Id} to repository {modelIssueInfo.Repository}");
+                _logger.LogInformation("Adding new issue #{IssueId} to repository {Repository}", modelIssueInfo.Id, modelIssueInfo.Repository);
+                State.RepositoryIssues[modelIssueInfo.Repository].Add(modelIssueInfo);
+            }
+            else
+            {
+                Console.WriteLine($"Issue #{modelIssueInfo.Id} already exists, updating");
+                _logger.LogInformation("Issue #{IssueId} already exists in repository {Repository}, updating", modelIssueInfo.Id, modelIssueInfo.Repository);
+                
+                // Update the issue if it exists
+                var index = State.RepositoryIssues[modelIssueInfo.Repository].FindIndex(i => i.Id == modelIssueInfo.Id);
+                if (index >= 0)
+                {
+                    State.RepositoryIssues[modelIssueInfo.Repository][index] = modelIssueInfo;
+                }
+            }
 
             // Extract tags from the issue using LLM
+            Console.WriteLine("\nExtracting tags from issue...");
             string[] extractedTags;
             try
             {
-                _logger.LogInformation("Attempting to extract tags using LLM for issue: {IssueTitle}", issueInfo.Title);
-                extractedTags = await ExtractTagsUsingLLMAsync(issueInfo);
-                _logger.LogInformation("Successfully extracted tags: {Tags}", string.Join(", ", extractedTags));
+                _logger.LogInformation("Attempting to extract tags using LLM for issue: {IssueTitle} (#{IssueId})", modelIssueInfo.Title, modelIssueInfo.Id);
+                extractedTags = await ExtractTagsUsingLLMAsync(modelIssueInfo);
+                Console.WriteLine($"Successfully extracted {extractedTags.Length} tags");
+                _logger.LogInformation("Successfully extracted {Count} tags for issue #{IssueId}", extractedTags.Length, modelIssueInfo.Id);
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"ERROR: Failed to extract tags using LLM: {ex.Message}");
+                Console.WriteLine("Falling back to basic extraction...");
                 _logger.LogError(ex, "Failed to extract tags using LLM, falling back to basic extraction");
-                extractedTags = ExtractBasicTagsFromIssue(issueInfo);
+                extractedTags = ExtractBasicTagsFromIssue(modelIssueInfo);
             }
             
             // Store tags in state
-            if (!State.IssueTags.ContainsKey(issueInfo.Repository))
+            Console.WriteLine("\nStoring tags in state...");
+            if (!State.IssueTags.ContainsKey(modelIssueInfo.Repository))
             {
-                State.IssueTags[issueInfo.Repository] = new Dictionary<string, List<string>>();
+                Console.WriteLine($"Creating new tag dictionary for repository {modelIssueInfo.Repository}");
+                _logger.LogInformation("Creating new tag dictionary for repository {Repository}", modelIssueInfo.Repository);
+                State.IssueTags[modelIssueInfo.Repository] = new Dictionary<string, List<string>>();
             }
             
-            State.IssueTags[issueInfo.Repository][issueInfo.Id] = extractedTags.ToList();
+            State.IssueTags[modelIssueInfo.Repository][modelIssueInfo.Id] = extractedTags.ToList();
+            Console.WriteLine($"Stored {extractedTags.Length} tags for issue #{modelIssueInfo.Id}");
+            _logger.LogInformation("Stored {Count} tags for issue #{IssueId} in repository {Repository}", 
+                extractedTags.Length, modelIssueInfo.Id, modelIssueInfo.Repository);
 
-            // Publish the extracted tags event if we have a stream provider
+            // Publish the extracted tags event
             try
             {
+                Console.WriteLine("\nPublishing extracted tags event...");
                 var tagsEvent = new IssueTagsEvent
                 {
-                    IssueId = issueInfo.Id,
-                    Title = issueInfo.Title,
+                    IssueId = modelIssueInfo.Id,
+                    Title = modelIssueInfo.Title,
                     ExtractedTags = extractedTags,
-                    Repository = issueInfo.Repository
+                    Repository = modelIssueInfo.Repository
                 };
                 
-                _logger.LogInformation("Attempting to get stream provider to publish tags");
-                var streamId = StreamId.Create(GitHubAnalysisStream.StreamNamespace, GitHubAnalysisStream.TagsStreamKey);
-                var stream = GetAppropriateStreamProvider().GetStream<IssueTagsEvent>(streamId);
-                await stream.OnNextAsync(tagsEvent);
+                _logger.LogInformation("Publishing tags event for issue #{IssueId}", modelIssueInfo.Id);
                 
-                _logger.LogInformation("Successfully published tags event for issue {IssueId}", issueInfo.Id);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "CRITICAL ERROR: Failed to publish tags event. Details: {ExceptionMessage}", ex.Message);
-            }
-
-            // Check if we should generate a summary report (when we have analyzed enough issues)
-            if (State.RepositoryIssues[issueInfo.Repository].Count % 5 == 0 || 
-                State.RepositoryIssues[issueInfo.Repository].Count == 1)
-            {
+                // Try to publish to both providers
                 try
                 {
-                    _logger.LogInformation("Generating summary report for repository: {Repository}", issueInfo.Repository);
-                    await GenerateSummaryReportAsync(issueInfo.Repository);
-                    _logger.LogInformation("Successfully generated summary report for repository: {Repository}", issueInfo.Repository);
+                    Console.WriteLine("Attempting to publish with primary provider...");
+                    var streamProvider = GetAppropriateStreamProvider();
+                    var streamId = StreamId.Create(GitHubAnalysisStream.StreamNamespace, GitHubAnalysisStream.TagsStreamKey);
+                    var stream = streamProvider.GetStream<IssueTagsEvent>(streamId);
+                    await stream.OnNextAsync(tagsEvent);
+                    
+                    Console.WriteLine("Successfully published tags event with primary provider");
+                    _logger.LogInformation("Successfully published tags event for issue #{IssueId}", modelIssueInfo.Id);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Failed to generate summary report for repository: {Repository}", issueInfo.Repository);
+                    Console.WriteLine($"Failed to publish tags with primary provider: {ex.Message}");
+                    Console.WriteLine("Trying alternate provider...");
+                    _logger.LogError(ex, "Failed to publish tags event with primary provider, trying alternate");
+                    
+                    try
+                    {
+                        // Try alternate provider
+                        var streamProvider = this.GetStreamProvider("MemoryStreams");
+                        var streamId = StreamId.Create(GitHubAnalysisStream.StreamNamespace, GitHubAnalysisStream.TagsStreamKey);
+                        var stream = streamProvider.GetStream<IssueTagsEvent>(streamId);
+                        await stream.OnNextAsync(tagsEvent);
+                        
+                        Console.WriteLine("Successfully published tags event with alternate provider");
+                        _logger.LogInformation("Successfully published tags event for issue #{IssueId} with alternate provider", modelIssueInfo.Id);
+                    }
+                    catch (Exception innerEx)
+                    {
+                        Console.WriteLine($"Failed to publish tags with alternate provider: {innerEx.Message}");
+                        _logger.LogError(innerEx, "Failed to publish tags event with alternate provider");
+                    }
                 }
             }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"CRITICAL ERROR: Failed to publish tags event: {ex.Message}");
+                _logger.LogError(ex, "CRITICAL ERROR: Failed to publish tags event. Details: {ExceptionMessage}", ex.Message);
+            }
+
+            // Generate summary report immediately for better feedback
+            try
+            {
+                Console.WriteLine("\nGenerating summary report...");
+                _logger.LogInformation("Generating summary report for repository: {Repository}", modelIssueInfo.Repository);
+                await GenerateSummaryReportAsync(modelIssueInfo.Repository);
+                Console.WriteLine("Successfully generated summary report");
+                _logger.LogInformation("Successfully generated summary report for repository: {Repository}", modelIssueInfo.Repository);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to generate summary report: {ex.Message}");
+                _logger.LogError(ex, "Failed to generate summary report for repository: {Repository}", modelIssueInfo.Repository);
+            }
+            
+            Console.WriteLine("\n======== COMPLETED PROCESSING GITHUB ISSUE EVENT ========\n");
         }
         catch (Exception ex)
         {
+            Console.WriteLine($"FATAL ERROR in issue handling: {ex.Message}");
             _logger.LogError(ex, "FATAL ERROR in HandleGitHubIssueEventInternalAsync: {ExceptionMessage}", ex.Message);
         }
     }
 
-    private async Task<string[]> ExtractTagsUsingLLMAsync(GitHubIssueInfo issueInfo)
+    private async Task<string[]> ExtractTagsUsingLLMAsync(GrainInterfaces.Models.GitHubIssueInfo issueInfo)
     {
         try
         {
+            Console.WriteLine($"\n\n======== EXTRACTING TAGS FOR ISSUE #{issueInfo.Id}: {issueInfo.Title} ========");
             _logger.LogWarning("========== STARTING LLM CALL FOR TAG EXTRACTION ==========");
-            _logger.LogWarning("Issue: {IssueTitle}", issueInfo.Title);
+            _logger.LogWarning("Processing issue: {IssueTitle} (#{IssueId})", issueInfo.Title, issueInfo.Id);
             
+            // Create a more effective prompt for better tag extraction
             string prompt = $@"
-Analyze the following GitHub issue and extract relevant tags/categories that describe the issue.
-Return only a comma-separated list of tags (5-10 tags).
+You are analyzing a GitHub issue to extract relevant tags. The tags will be used to categorize issues and identify common themes.
 
+ISSUE DETAILS:
+ID: {issueInfo.Id}
 Title: {issueInfo.Title}
 Description: {issueInfo.Description}
-Existing Labels: {string.Join(", ", issueInfo.Labels)}
 Status: {issueInfo.Status}
+Repository: {issueInfo.Repository}
+Existing Labels: {string.Join(", ", issueInfo.Labels)}
+
+TASK:
+Extract 5-8 most relevant tags from this issue that describe:
+1. Issue type (bug, feature-request, question, documentation, etc.)
+2. Technical areas (networking, ui, database, authentication, etc.)
+3. Priority level (critical, high, medium, low)
+4. Affected components (if identifiable)
+
+FORMAT REQUIREMENTS:
+- Return ONLY a comma-separated list of tags (no explanations)
+- Use lowercase with hyphens for multi-word tags (e.g. 'feature-request')
+- Be specific and descriptive
+- Include the issue status (open/closed) as one of the tags
+
+EXAMPLE OUTPUT:
+bug, networking, authentication, high-priority, connection-error, open
 ";
 
-            _logger.LogWarning("LLM Service Type: {LLMServiceType}", _llmService.GetType().Name);
-            _logger.LogWarning("Calling LLM service with prompt length: {Length}", prompt.Length);
-            _logger.LogWarning("First 100 chars of prompt: {PromptStart}", prompt.Substring(0, Math.Min(100, prompt.Length)));
-            
+            Console.WriteLine("Sending LLM prompt for tag extraction...");
+            _logger.LogInformation("Calling LLM service for tag extraction");
             var tags = await _llmService.CompletePromptAsync(prompt);
             
-            _logger.LogWarning("========== COMPLETED LLM CALL FOR TAG EXTRACTION ==========");
-            _logger.LogWarning("LLM Response: {Response}", tags);
+            Console.WriteLine($"LLM RESPONSE FOR TAGS: {tags}");
+            _logger.LogWarning("LLM Response for tag extraction: {Response}", tags);
             
             if (string.IsNullOrWhiteSpace(tags))
             {
-                _logger.LogWarning("LLM returned empty tags for issue {IssueId}, falling back to basic extraction", issueInfo.Id);
-                return ExtractBasicTagsFromIssue(issueInfo);
+                Console.WriteLine("WARNING: LLM returned empty tags, trying simpler prompt");
+                _logger.LogWarning("LLM returned empty tags for issue {IssueId}, trying simpler prompt", issueInfo.Id);
+                
+                // Try a simpler prompt as fallback
+                string simplePrompt = $@"
+Extract 5-8 tags from this GitHub issue:
+Title: {issueInfo.Title}
+Description: {issueInfo.Description}
+Status: {issueInfo.Status}
+
+Return only comma-separated tags.
+";
+                Console.WriteLine("Trying fallback prompt for tag extraction...");
+                tags = await _llmService.CompletePromptAsync(simplePrompt);
+                Console.WriteLine($"FALLBACK LLM RESPONSE: {tags}");
+                
+                if (string.IsNullOrWhiteSpace(tags))
+                {
+                    Console.WriteLine("WARNING: LLM still returned empty tags, falling back to basic extraction");
+                    _logger.LogWarning("LLM still returned empty tags with simpler prompt, falling back to basic extraction");
+                    return ExtractBasicTagsFromIssue(issueInfo);
+                }
             }
             
             var tagArray = tags.Split(',', StringSplitOptions.RemoveEmptyEntries)
@@ -429,23 +699,26 @@ Status: {issueInfo.Status}
                 
             if (tagArray.Length == 0)
             {
+                Console.WriteLine("WARNING: No valid tags found, using basic extraction");
                 _logger.LogWarning("No valid tags found after processing LLM response, falling back to basic extraction");
                 return ExtractBasicTagsFromIssue(issueInfo);
             }
             
-            _logger.LogWarning("Successfully extracted {Count} tags: {Tags}", 
-                tagArray.Length, string.Join(", ", tagArray));
+            Console.WriteLine($"EXTRACTED TAGS ({tagArray.Length}): {string.Join(", ", tagArray)}");
+            _logger.LogWarning("Successfully extracted {Count} tags for issue #{IssueId}: {Tags}", 
+                tagArray.Length, issueInfo.Id, string.Join(", ", tagArray));
                 
             return tagArray;
         }
         catch (Exception ex)
         {
+            Console.WriteLine($"ERROR: Tag extraction failed: {ex.Message}");
             _logger.LogError(ex, "Error extracting tags using LLM for issue {IssueId}, falling back to basic extraction", issueInfo.Id);
             return ExtractBasicTagsFromIssue(issueInfo);
         }
     }
 
-    private string[] ExtractBasicTagsFromIssue(GitHubIssueInfo issueInfo)
+    private string[] ExtractBasicTagsFromIssue(GrainInterfaces.Models.GitHubIssueInfo issueInfo)
     {
         try
         {
@@ -554,226 +827,606 @@ Status: {issueInfo.Status}
     {
         try
         {
-            _logger.LogWarning("====================================================");
-            _logger.LogWarning("    GENERATING SUMMARY REPORT                      ");
-            _logger.LogWarning("====================================================");
-            _logger.LogWarning("Repository: {Repository}", repository);
-            _logger.LogWarning("Total issues: {TotalIssues}", State.RepositoryIssues[repository].Count);
-            _logger.LogWarning("====================================================");
-
-            // Calculate tag frequencies
-            var tagFrequency = new Dictionary<string, int>();
+            Console.WriteLine($"\n\n======== GENERATING SUMMARY REPORT FOR {repository} ========");
+            _logger.LogInformation("Generating summary report for repository: {Repository}", repository);
             
-            foreach (var issueId in State.IssueTags[repository].Keys)
+            if (!State.RepositoryIssues.ContainsKey(repository) || State.RepositoryIssues[repository].Count == 0)
             {
-                var tags = State.IssueTags[repository][issueId];
-                foreach (var tag in tags)
+                Console.WriteLine($"ERROR: No issues found for repository {repository}, cannot generate summary report");
+                _logger.LogWarning("No issues found for repository {Repository}, cannot generate summary report", repository);
+                return;
+            }
+
+            // Get repository statistics
+            var issues = State.RepositoryIssues[repository];
+            var issueCount = issues.Count;
+            var openIssues = issues.Count(i => i.State == "open");
+            var closedIssues = issues.Count(i => i.State == "closed");
+            var oldestIssueDate = issues.Min(i => i.CreatedAt);
+            var newestIssueDate = issues.Max(i => i.CreatedAt);
+            
+            Console.WriteLine($"\nREPOSITORY STATS: {repository}");
+            Console.WriteLine($"Total Issues: {issueCount} ({openIssues} open, {closedIssues} closed)");
+            Console.WriteLine($"Date Range: {oldestIssueDate:yyyy-MM-dd} to {newestIssueDate:yyyy-MM-dd}");
+            
+            _logger.LogInformation("Repository {Repository} has {IssueCount} issues: {OpenCount} open, {ClosedCount} closed", 
+                repository, issueCount, openIssues, closedIssues);
+
+            // Get most common tags across all issues
+            Dictionary<string, int> tagCounts = new Dictionary<string, int>();
+            if (State.IssueTags.ContainsKey(repository))
+            {
+                foreach (var tagList in State.IssueTags[repository].Values)
                 {
-                    if (!tagFrequency.ContainsKey(tag))
+                    foreach (var tag in tagList)
                     {
-                        tagFrequency[tag] = 0;
+                        if (!tagCounts.ContainsKey(tag))
+                        {
+                            tagCounts[tag] = 0;
+                        }
+                        tagCounts[tag]++;
                     }
-                    tagFrequency[tag]++;
                 }
             }
             
-            // Log tag frequencies
-            _logger.LogInformation("Tag frequencies:");
-            foreach (var tag in tagFrequency.OrderByDescending(t => t.Value))
+            var topTags = tagCounts
+                .OrderByDescending(t => t.Value)
+                .Take(10)
+                .Select(t => new TagStatistic { Tag = t.Key, Count = t.Value })
+                .ToArray();
+            
+            Console.WriteLine("\nTOP TAGS:");
+            foreach (var tag in topTags)
             {
-                _logger.LogInformation("  - {Tag}: {Count}", tag.Key, tag.Value);
+                Console.WriteLine($"  - {tag.Tag}: {tag.Count} issues");
             }
             
-            // Generate recommendations
-            List<string> recommendations;
+            _logger.LogInformation("Extracted {Count} top tags for repository {Repository}", topTags.Length, repository);
+
+            // Generate recommendations using LLM
+            Console.WriteLine("\nGENERATING RECOMMENDATIONS...");
+            var recommendations = await GetRecommendationsUsingLLMAsync(repository, 5);
+            _logger.LogInformation("Generated {Count} recommendations for repository {Repository}", recommendations.Length, repository);
+
+            // Calculate issue activity over time
+            Console.WriteLine("\nGENERATING TIME-BASED STATISTICS...");
+            var timeRanges = GenerateTimeRangeData(issues);
+            _logger.LogInformation("Generated time-based statistics for {Count} periods", timeRanges.Length);
+            
+            Console.WriteLine("\nISSUE ACTIVITY OVER TIME:");
+            foreach (var range in timeRanges)
+            {
+                Console.WriteLine($"  {range.StartDate:yyyy-MM-dd} to {range.EndDate:yyyy-MM-dd}: {range.IssuesCreated} created, {range.IssuesClosed} closed");
+            }
+
+            // Build the summary report
+            var summaryReport = new RepositorySummaryReport
+            {
+                Repository = repository,
+                GeneratedAt = DateTime.UtcNow,
+                TotalIssues = issueCount,
+                OpenIssues = openIssues,
+                ClosedIssues = closedIssues,
+                OldestIssueDate = oldestIssueDate,
+                NewestIssueDate = newestIssueDate,
+                TopTags = topTags,
+                Recommendations = recommendations,
+                TimeRanges = timeRanges
+            };
+
+            // Publish the summary report
             try
             {
-                _logger.LogInformation("Generating recommendations using LLM");
-                recommendations = await GenerateRecommendationsUsingLLMAsync(repository, State.RepositoryIssues[repository], tagFrequency);
-                _logger.LogInformation("Successfully generated recommendations using LLM");
+                Console.WriteLine("\nPUBLISHING SUMMARY REPORT...");
+                _logger.LogInformation("Publishing summary report for repository {Repository}", repository);
+                
+                try
+                {
+                    var streamProvider = GetAppropriateStreamProvider();
+                    var streamId = StreamId.Create(GitHubAnalysisStream.StreamNamespace, GitHubAnalysisStream.SummaryStreamKey);
+                    var stream = streamProvider.GetStream<RepositorySummaryReport>(streamId);
+                    await stream.OnNextAsync(summaryReport);
+                    
+                    Console.WriteLine($"Successfully published summary report via {streamProvider} provider");
+                    _logger.LogInformation("Successfully published summary report for repository {Repository}", repository);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Failed to publish with primary provider: {ex.Message}, trying alternate");
+                    _logger.LogError(ex, "Failed to publish summary report with primary provider, trying alternate");
+                    
+                    try
+                    {
+                        // Try alternate provider
+                        var streamProvider = this.GetStreamProvider("MemoryStreams");
+                        var streamId = StreamId.Create(GitHubAnalysisStream.StreamNamespace, GitHubAnalysisStream.SummaryStreamKey);
+                        var stream = streamProvider.GetStream<RepositorySummaryReport>(streamId);
+                        await stream.OnNextAsync(summaryReport);
+                        
+                        Console.WriteLine("Successfully published summary report with alternate provider");
+                        _logger.LogInformation("Successfully published summary report with alternate provider");
+                    }
+                    catch (Exception innerEx)
+                    {
+                        Console.WriteLine($"Failed to publish with alternate provider: {innerEx.Message}, storing in state");
+                        _logger.LogError(innerEx, "Failed to publish summary report with alternate provider");
+                        
+                        // Store in state as a last resort
+                        if (!State.RepositorySummaries.ContainsKey(repository))
+                        {
+                            State.RepositorySummaries[repository] = new List<RepositorySummaryReport>();
+                        }
+                        
+                        State.RepositorySummaries[repository].Add(summaryReport);
+                        Console.WriteLine("Stored summary report in agent state");
+                        _logger.LogInformation("Stored summary report in state for repository {Repository}", repository);
+                    }
+                }
+                
+                // Print a complete summary for the console
+                Console.WriteLine("\n\n========== COMPLETE REPOSITORY ANALYSIS SUMMARY ==========");
+                Console.WriteLine($"Repository: {repository}");
+                Console.WriteLine($"Total Issues: {issueCount} ({openIssues} open, {closedIssues} closed)");
+                Console.WriteLine($"Analysis Time: {summaryReport.GeneratedAt}");
+                
+                Console.WriteLine("\nTOP TAGS:");
+                foreach (var tag in topTags)
+                {
+                    Console.WriteLine($"  - {tag.Tag}: {tag.Count} issues");
+                }
+                
+                Console.WriteLine("\nRECOMMENDATIONS:");
+                foreach (var rec in recommendations)
+                {
+                    Console.WriteLine($"\n* {rec.Title} (Priority: {rec.Priority})");
+                    Console.WriteLine($"  Supporting Issues: {string.Join(", ", rec.SupportingIssues.Select(i => $"#{i}"))}");
+                    Console.WriteLine($"  {rec.Description}");
+                }
+                
+                Console.WriteLine("\n========== END OF ANALYSIS SUMMARY ==========\n");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to generate recommendations using LLM, falling back to basic generation");
-                recommendations = GenerateBasicRecommendations(repository, tagFrequency);
+                Console.WriteLine($"CRITICAL ERROR publishing summary report: {ex.Message}");
+                _logger.LogError(ex, "CRITICAL ERROR: Failed to publish summary report. Details: {ExceptionMessage}", ex.Message);
             }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ERROR generating summary report: {ex.Message}");
+            _logger.LogError(ex, "Failed to generate summary report for repository {Repository}", repository);
+        }
+    }
+
+    private TimeRangeStatistic[] GenerateTimeRangeData(List<GrainInterfaces.Models.GitHubIssueInfo> issues)
+    {
+        try
+        {
+            _logger.LogInformation("Generating time-based statistics for {Count} issues", issues.Count);
             
-            // Create detailed issue list with analysis
-            var analyzedIssues = new List<IssueDetails>();
-            foreach (var issue in State.RepositoryIssues[repository])
+            if (issues.Count == 0)
             {
-                if (State.IssueTags[repository].TryGetValue(issue.Id, out var tags))
+                return Array.Empty<TimeRangeStatistic>();
+            }
+
+            // Determine the time ranges to use based on the data
+            DateTime oldestDate = issues.Min(i => i.CreatedAt);
+            DateTime newestDate = DateTime.UtcNow;
+            TimeSpan totalTimeSpan = newestDate - oldestDate;
+            
+            List<TimeRangeStatistic> statistics = new List<TimeRangeStatistic>();
+            
+            // If less than 30 days of data, do daily stats for the past week
+            if (totalTimeSpan.TotalDays < 30)
+            {
+                _logger.LogInformation("Using daily statistics for the past week");
+                
+                for (int i = 6; i >= 0; i--)
                 {
-                    analyzedIssues.Add(new IssueDetails
+                    DateTime day = DateTime.UtcNow.Date.AddDays(-i);
+                    DateTime nextDay = day.AddDays(1);
+                    
+                    int issuesCreated = issues.Count(issue => issue.CreatedAt >= day && issue.CreatedAt < nextDay);
+                    int issuesClosed = issues.Count(issue => 
+                        issue.State == "closed" && 
+                        issue.ClosedAt.HasValue && 
+                        issue.ClosedAt.Value >= day && 
+                        issue.ClosedAt.Value < nextDay);
+                    
+                    statistics.Add(new TimeRangeStatistic
                     {
-                        Id = issue.Id,
-                        Title = issue.Title,
-                        Url = issue.Url,
-                        Tags = tags.ToList()
+                        StartDate = day,
+                        EndDate = nextDay,
+                        IssuesCreated = issuesCreated,
+                        IssuesClosed = issuesClosed
+                    });
+                }
+            }
+            // If less than 90 days, do weekly stats
+            else if (totalTimeSpan.TotalDays < 90)
+            {
+                _logger.LogInformation("Using weekly statistics for the past 4 weeks");
+                
+                for (int i = 3; i >= 0; i--)
+                {
+                    DateTime weekStart = DateTime.UtcNow.Date.AddDays(-(i * 7) - 6);
+                    DateTime weekEnd = weekStart.AddDays(7);
+                    
+                    int issuesCreated = issues.Count(issue => issue.CreatedAt >= weekStart && issue.CreatedAt < weekEnd);
+                    int issuesClosed = issues.Count(issue => 
+                        issue.State == "closed" && 
+                        issue.ClosedAt.HasValue && 
+                        issue.ClosedAt.Value >= weekStart && 
+                        issue.ClosedAt.Value < weekEnd);
+                    
+                    statistics.Add(new TimeRangeStatistic
+                    {
+                        StartDate = weekStart,
+                        EndDate = weekEnd,
+                        IssuesCreated = issuesCreated,
+                        IssuesClosed = issuesClosed
+                    });
+                }
+            }
+            // Otherwise, do monthly stats
+            else
+            {
+                _logger.LogInformation("Using monthly statistics for the past 6 months");
+                
+                for (int i = 5; i >= 0; i--)
+                {
+                    DateTime monthStart = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1).AddMonths(-i);
+                    DateTime monthEnd = monthStart.AddMonths(1);
+                    
+                    int issuesCreated = issues.Count(issue => issue.CreatedAt >= monthStart && issue.CreatedAt < monthEnd);
+                    int issuesClosed = issues.Count(issue => 
+                        issue.State == "closed" && 
+                        issue.ClosedAt.HasValue && 
+                        issue.ClosedAt.Value >= monthStart && 
+                        issue.ClosedAt.Value < monthEnd);
+                    
+                    statistics.Add(new TimeRangeStatistic
+                    {
+                        StartDate = monthStart,
+                        EndDate = monthEnd,
+                        IssuesCreated = issuesCreated,
+                        IssuesClosed = issuesClosed
                     });
                 }
             }
             
-            // Create the report
-            var report = new SummaryReportEvent
-            {
-                Repository = repository,
-                TotalIssuesAnalyzed = State.RepositoryIssues[repository].Count,
-                GeneratedAt = DateTime.UtcNow,
-                TagFrequency = tagFrequency,
-                PriorityRecommendations = recommendations,
-                AnalyzedIssues = analyzedIssues
-            };
-            
-            // Try to publish to MemoryStreams first
-            try
-            {
-                _logger.LogWarning("Attempting to publish summary report to MemoryStreams");
-                var memoryProvider = this.GetStreamProvider("MemoryStreams");
-                var memoryStream = memoryProvider.GetStream<SummaryReportEvent>(
-                    StreamId.Create(GitHubAnalysisStream.StreamNamespace, Guid.Empty));
-                await memoryStream.OnNextAsync(report);
-                _logger.LogWarning("Successfully published summary report to MemoryStreams");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to publish summary report to MemoryStreams");
-            }
-            
-            // Also try to publish to Aevatar provider
-            try
-            {
-                _logger.LogWarning("Attempting to publish summary report to Aevatar provider");
-                var aevatarProvider = this.GetStreamProvider("Aevatar");
-                var aevatarStream = aevatarProvider.GetStream<SummaryReportEvent>(
-                    StreamId.Create(GitHubAnalysisStream.StreamNamespace, Guid.Empty));
-                await aevatarStream.OnNextAsync(report);
-                _logger.LogWarning("Successfully published summary report to Aevatar provider");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to publish summary report to Aevatar provider");
-            }
-            
-            _logger.LogWarning("Summary report generation completed for {Repository}", repository);
+            return statistics.ToArray();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to generate summary report");
+            _logger.LogError(ex, "Failed to generate time range statistics");
+            return Array.Empty<TimeRangeStatistic>();
         }
     }
 
-    private async Task<List<string>> GenerateRecommendationsUsingLLMAsync(string repository, List<GitHubIssueInfo> issues, Dictionary<string, int> tagFrequency)
+    private async Task<IssueRecommendation[]> GetRecommendationsUsingLLMAsync(string repository, int topIssuesCount = 3)
     {
         try
         {
-            _logger.LogWarning("========== STARTING LLM CALL FOR RECOMMENDATIONS GENERATION ==========");
-            _logger.LogWarning("Repository: {Repository}, Issue Count: {IssueCount}", repository, issues.Count);
+            Console.WriteLine($"\n\n======== GENERATING RECOMMENDATIONS FOR REPOSITORY: {repository} ========");
+            _logger.LogInformation("Generating recommendations for repository {Repository}, considering top {Count} issues", 
+                repository, topIssuesCount);
             
-            // Create a summary of the issues and tags
-            var topIssues = issues.Take(10).ToList();
-            var topTags = tagFrequency.OrderByDescending(kv => kv.Value).Take(10).ToList();
+            if (!State.RepositoryIssues.ContainsKey(repository) || State.RepositoryIssues[repository].Count == 0)
+            {
+                Console.WriteLine($"ERROR: No issues found for repository {repository}");
+                _logger.LogWarning("No issues found for repository {Repository}, cannot generate recommendations", repository);
+                return Array.Empty<IssueRecommendation>();
+            }
+
+            // Get the most recent issues, sorted by creation date
+            var recentIssues = State.RepositoryIssues[repository]
+                .OrderByDescending(i => i.CreatedAt)
+                .Take(topIssuesCount)
+                .ToList();
             
-            string tagsStr = string.Join("\n", topTags.Select(t => $"- {t.Key}: {t.Value} issues"));
-            string issuesStr = string.Join("\n", topIssues.Select(i => $"- {i.Title} [{string.Join(", ", State.IssueTags[repository][i.Id])}]"));
+            Console.WriteLine($"Found {recentIssues.Count} recent issues to analyze for recommendations");
             
-            string prompt = $@"
-Analyze the following GitHub repository data and provide strategic recommendations for the development team.
-Return 3-5 prioritized recommendations, each on a new line.
+            if (recentIssues.Count == 0)
+            {
+                Console.WriteLine($"ERROR: No recent issues found for repository {repository}");
+                _logger.LogWarning("No recent issues found for repository {Repository}, cannot generate recommendations", repository);
+                return Array.Empty<IssueRecommendation>();
+            }
 
-Repository: {repository}
-Number of Issues: {issues.Count}
+            // Extract tags for all these issues
+            var issuesWithTags = new List<(GrainInterfaces.Models.GitHubIssueInfo Issue, List<string> Tags)>();
+            foreach (var issue in recentIssues)
+            {
+                if (State.IssueTags.ContainsKey(repository) && 
+                    State.IssueTags[repository].ContainsKey(issue.Id))
+                {
+                    Console.WriteLine($"Using existing tags for issue #{issue.Id}");
+                    issuesWithTags.Add((issue, State.IssueTags[repository][issue.Id]));
+                }
+                else
+                {
+                    // If tags haven't been extracted yet, do it now
+                    try
+                    {
+                        Console.WriteLine($"Tags not found for issue #{issue.Id}, extracting now");
+                        _logger.LogInformation("Tags not found for issue #{IssueId}, extracting now", issue.Id);
+                        var tags = await ExtractTagsUsingLLMAsync(issue);
+                        issuesWithTags.Add((issue, tags.ToList()));
+                        
+                        // Store for future use
+                        if (!State.IssueTags.ContainsKey(repository))
+                        {
+                            State.IssueTags[repository] = new Dictionary<string, List<string>>();
+                        }
+                        State.IssueTags[repository][issue.Id] = tags.ToList();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"ERROR: Failed to extract tags for issue #{issue.Id}: {ex.Message}");
+                        _logger.LogError(ex, "Failed to extract tags for issue #{IssueId}, using empty tag list", issue.Id);
+                        issuesWithTags.Add((issue, new List<string>()));
+                    }
+                }
+            }
 
-Top Tags:
-{tagsStr}
+            Console.WriteLine("Preparing issue summaries for LLM prompt...");
+            var issuesText = string.Join("\n\n", issuesWithTags.Select(it => 
+                $"Issue #{it.Issue.Id}: {it.Issue.Title}\n" +
+                $"Created: {it.Issue.CreatedAt}\n" +
+                $"Description: {it.Issue.Description?.Substring(0, Math.Min(it.Issue.Description?.Length ?? 0, 500)) ?? "No description"}\n" +
+                $"Tags: {string.Join(", ", it.Tags)}"
+            ));
 
-Sample Issues:
-{issuesStr}
+            // Build a comprehensive prompt for the LLM
+            var prompt = $@"
+I need you to analyze GitHub issues from the repository '{repository}' and provide actionable recommendations.
 
-Based on this data, what are the 3-5 most important priorities for the development team?
+Here are the most recent issues:
+
+{issuesText}
+
+Based on these issues, please provide THREE specific, actionable recommendations for the repository maintainers.
+For each recommendation:
+1. Provide a clear, concise title (max 100 characters)
+2. Write a detailed description explaining the reasoning behind the recommendation (100-300 words)
+3. List any specific issues that support this recommendation
+4. Assign a priority level (High, Medium, Low) based on urgency and impact
+
+FORMAT YOUR RESPONSE EXACTLY AS FOLLOWS:
+```
+RECOMMENDATION 1:
+Title: [Short descriptive title]
+Priority: [High/Medium/Low]
+Description: [Detailed explanation]
+Supporting Issues: [List of issue numbers]
+
+RECOMMENDATION 2:
+Title: [Short descriptive title]
+Priority: [High/Medium/Low]
+Description: [Detailed explanation]
+Supporting Issues: [List of issue numbers]
+
+RECOMMENDATION 3:
+Title: [Short descriptive title]
+Priority: [High/Medium/Low]
+Description: [Detailed explanation]
+Supporting Issues: [List of issue numbers]
+```
+
+IMPORTANT: Ensure your recommendations are SPECIFIC and ACTIONABLE. Do not provide generic advice.
 ";
 
-            _logger.LogInformation("Calling LLM service with recommendations prompt of length {Length}", prompt.Length);
-            var recommendations = await _llmService.CompletePromptAsync(prompt);
-            _logger.LogWarning("========== COMPLETED LLM CALL FOR RECOMMENDATIONS GENERATION ==========");
-            
-            if (string.IsNullOrWhiteSpace(recommendations))
+            Console.WriteLine("Sending LLM prompt for recommendations...");
+            _logger.LogInformation("Calling LLM for repository recommendations analysis");
+            var llmResponse = await _llmService.CompletePromptAsync(prompt);
+            Console.WriteLine($"\nRECEIVED LLM RESPONSE OF LENGTH: {llmResponse?.Length ?? 0} CHARACTERS");
+            _logger.LogInformation("Received LLM response for recommendations, processing");
+
+            if (string.IsNullOrEmpty(llmResponse))
             {
-                _logger.LogWarning("LLM returned empty recommendations for repository {Repository}, falling back to basic recommendations", repository);
-                return GenerateBasicRecommendations(repository, tagFrequency);
+                Console.WriteLine("WARNING: Received empty response from LLM, trying simpler prompt");
+                _logger.LogWarning("Received empty response from LLM for recommendations, trying simplified prompt");
+                
+                // Simplified fallback prompt
+                var fallbackPrompt = $@"
+Analyze these GitHub issues and provide 3 actionable recommendations:
+
+{issuesText}
+
+Format: For each recommendation, include:
+1. Title (one line)
+2. Priority (High/Medium/Low)
+3. Description (brief paragraph)
+4. Supporting Issues (list of numbers)
+";
+                Console.WriteLine("Sending fallback LLM prompt for recommendations...");
+                llmResponse = await _llmService.CompletePromptAsync(fallbackPrompt);
+                Console.WriteLine($"\nRECEIVED FALLBACK LLM RESPONSE OF LENGTH: {llmResponse?.Length ?? 0} CHARACTERS");
+                
+                if (string.IsNullOrEmpty(llmResponse))
+                {
+                    Console.WriteLine("ERROR: Failed to get any recommendations from LLM");
+                    _logger.LogError("Failed to get recommendations from LLM with fallback prompt");
+                    return Array.Empty<IssueRecommendation>();
+                }
+            }
+
+            Console.WriteLine($"\nLLM RESPONSE FOR RECOMMENDATIONS:\n{llmResponse}");
+            
+            // Process the response into structured recommendations
+            var recommendations = ParseRecommendationsFromLLMResponse(llmResponse, recentIssues);
+            
+            Console.WriteLine($"\nFINAL RECOMMENDATIONS ({recommendations.Length}):");
+            foreach (var rec in recommendations)
+            {
+                Console.WriteLine($"\n* {rec.Title} (Priority: {rec.Priority})");
+                Console.WriteLine($"  Supporting Issues: {string.Join(", ", rec.SupportingIssues.Select(i => $"#{i}"))}");
+                Console.WriteLine($"  {rec.Description.Substring(0, Math.Min(rec.Description.Length, 100))}...");
             }
             
-            var recommendationList = recommendations
-                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                .Select(r => r.Trim())
-                .Where(r => !string.IsNullOrWhiteSpace(r))
-                .Select(r => r.StartsWith("-") ? r.Substring(1).Trim() : r)
-                .ToList();
-                
-            _logger.LogInformation("Successfully generated {Count} recommendations for repository {Repository}", 
-                recommendationList.Count, repository);
-                
-            return recommendationList;
+            return recommendations;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error generating recommendations using LLM for repository {Repository}, falling back to basic recommendations", repository);
-            return GenerateBasicRecommendations(repository, tagFrequency);
+            Console.WriteLine($"ERROR: Failed to generate recommendations: {ex.Message}");
+            _logger.LogError(ex, "Failed to generate recommendations using LLM: {Message}", ex.Message);
+            return Array.Empty<IssueRecommendation>();
         }
-    }
-    
-    private List<string> GenerateBasicRecommendations(string repository, Dictionary<string, int> tagFrequency)
-    {
-        var recommendations = new List<string>();
-        
-        // If we have no issues, return generic recommendations
-        if (!State.RepositoryIssues.ContainsKey(repository) || State.RepositoryIssues[repository].Count == 0)
-        {
-            recommendations.Add("Initialize repository with a proper README and documentation");
-            recommendations.Add("Set up CI/CD pipelines for automated testing and deployment");
-            recommendations.Add("Establish coding standards and contribution guidelines");
-            return recommendations;
-        }
-        
-        // Get top tags
-        var topTags = tagFrequency.OrderByDescending(kv => kv.Value).Take(3).ToList();
-        
-        // Add recommendations based on top tags
-        foreach (var tag in topTags)
-        {
-            switch (tag.Key.ToLower())
-            {
-                case "bug":
-                    recommendations.Add($"Fix reported bugs (found in {tag.Value} issues)");
-                    break;
-                case "feature":
-                    recommendations.Add($"Implement requested features (found in {tag.Value} issues)");
-                    break;
-                case "enhancement":
-                    recommendations.Add($"Enhance existing functionality (found in {tag.Value} issues)");
-                    break;
-                case "documentation":
-                    recommendations.Add($"Improve documentation (found in {tag.Value} issues)");
-                    break;
-                case "security":
-                    recommendations.Add($"Address security concerns (found in {tag.Value} issues)");
-                    break;
-                case "performance":
-                    recommendations.Add($"Optimize performance (found in {tag.Value} issues)");
-                    break;
-                default:
-                    recommendations.Add($"Focus on {tag.Key} (found in {tag.Value} issues)");
-                    break;
-            }
-        }
-        
-        // Add a general recommendation
-        recommendations.Add("Regularly review and triage open issues");
-        
-        return recommendations;
     }
 
-    // Add the additional required IAsyncObserver methods
+    private IssueRecommendation[] ParseRecommendationsFromLLMResponse(string llmResponse, List<GrainInterfaces.Models.GitHubIssueInfo> availableIssues)
+    {
+        try
+        {
+            var recommendations = new List<IssueRecommendation>();
+            
+            // Split the response into recommendation blocks
+            var recommendationPattern = @"RECOMMENDATION\s+\d+:[\s\S]*?(?=RECOMMENDATION\s+\d+:|$)";
+            var matches = Regex.Matches(llmResponse, recommendationPattern, RegexOptions.IgnoreCase);
+            
+            if (matches.Count == 0)
+            {
+                _logger.LogWarning("Could not find recommendation pattern in LLM response, trying alternative parsing");
+                
+                // Try to extract recommendations by looking for title pattern
+                var titlePattern = @"Title:\s*([^\n]+)";
+                var titleMatches = Regex.Matches(llmResponse, titlePattern, RegexOptions.IgnoreCase);
+                
+                if (titleMatches.Count > 0)
+                {
+                    _logger.LogInformation("Found {Count} title patterns, attempting to parse recommendations", titleMatches.Count);
+                    var sections = llmResponse.Split(new[] { "Title:" }, StringSplitOptions.RemoveEmptyEntries);
+                    
+                    foreach (var section in sections.Skip(1))  // Skip the first split which is before any "Title:"
+                    {
+                        try
+                        {
+                            var fullSection = "Title:" + section;
+                            
+                            var title = Regex.Match(fullSection, @"Title:\s*([^\n]+)", RegexOptions.IgnoreCase)
+                                .Groups[1].Value.Trim();
+                                
+                            var priority = Regex.Match(fullSection, @"Priority:\s*([^\n]+)", RegexOptions.IgnoreCase)
+                                .Groups[1].Value.Trim();
+                                
+                            var description = Regex.Match(fullSection, @"Description:\s*([\s\S]*?)(?=Supporting Issues:|Priority:|Title:|$)", RegexOptions.IgnoreCase)
+                                .Groups[1].Value.Trim();
+                                
+                            var supportingIssuesText = Regex.Match(fullSection, @"Supporting Issues:\s*([\s\S]*?)(?=RECOMMENDATION|$)", RegexOptions.IgnoreCase)
+                                .Groups[1].Value.Trim();
+                            
+                            var supportingIssues = new List<string>();
+                            var issueNumberPattern = @"#(\d+)";
+                            foreach (Match issueMatch in Regex.Matches(supportingIssuesText, issueNumberPattern))
+                            {
+                                supportingIssues.Add(issueMatch.Groups[1].Value);
+                            }
+                            
+                            if (!string.IsNullOrEmpty(title))
+                            {
+                                var recommendation = new IssueRecommendation
+                                {
+                                    Title = title,
+                                    Description = description,
+                                    Priority = GetPriorityEnum(priority),
+                                    SupportingIssues = supportingIssues.ToArray()
+                                };
+                                
+                                recommendations.Add(recommendation);
+                                _logger.LogInformation("Successfully parsed recommendation: {Title}", title);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Failed to parse recommendation section");
+                        }
+                    }
+                }
+                
+                if (recommendations.Count == 0)
+                {
+                    _logger.LogWarning("Failed to parse any recommendations, constructing fallback recommendation");
+                    
+                    // Create a fallback recommendation
+                    recommendations.Add(new IssueRecommendation
+                    {
+                        Title = "Review Recent Repository Issues",
+                        Description = "Multiple issues were detected in the repository but the system couldn't generate specific recommendations. Please review the most recent issues manually.",
+                        Priority = Priority.Medium,
+                        SupportingIssues = availableIssues.Select(i => i.Id).ToArray()
+                    });
+                }
+                
+                return recommendations.ToArray();
+            }
+            
+            // Standard parsing from well-formatted response
+            foreach (Match match in matches)
+            {
+                try
+                {
+                    var recommendationText = match.Value;
+                    
+                    var title = Regex.Match(recommendationText, @"Title:\s*([^\n]+)")
+                        .Groups[1].Value.Trim();
+                        
+                    var priority = Regex.Match(recommendationText, @"Priority:\s*([^\n]+)")
+                        .Groups[1].Value.Trim();
+                        
+                    var description = Regex.Match(recommendationText, @"Description:\s*([\s\S]*?)(?=Supporting Issues:|$)")
+                        .Groups[1].Value.Trim();
+                        
+                    var supportingIssuesText = Regex.Match(recommendationText, @"Supporting Issues:\s*([\s\S]*)")
+                        .Groups[1].Value.Trim();
+                    
+                    var supportingIssues = new List<string>();
+                    var issueNumberPattern = @"#(\d+)";
+                    foreach (Match issueMatch in Regex.Matches(supportingIssuesText, issueNumberPattern))
+                    {
+                        supportingIssues.Add(issueMatch.Groups[1].Value);
+                    }
+                    
+                    var recommendation = new IssueRecommendation
+                    {
+                        Title = title,
+                        Description = description,
+                        Priority = GetPriorityEnum(priority),
+                        SupportingIssues = supportingIssues.ToArray()
+                    };
+                    
+                    recommendations.Add(recommendation);
+                    _logger.LogInformation("Successfully parsed recommendation: {Title}", title);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to parse recommendation from match");
+                }
+            }
+            
+            return recommendations.ToArray();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error parsing recommendations from LLM response");
+            return Array.Empty<IssueRecommendation>();
+        }
+    }
+
+    private Priority GetPriorityEnum(string priority)
+    {
+        if (string.IsNullOrEmpty(priority))
+            return Priority.Medium;
+        
+        return priority.Trim().ToLower() switch
+        {
+            "high" => Priority.High,
+            "low" => Priority.Low,
+            _ => Priority.Medium
+        };
+    }
+
+    // Add the required IAsyncObserver implementation methods
     public Task OnCompletedAsync()
     {
         _logger.LogInformation("Stream completed notification received");
