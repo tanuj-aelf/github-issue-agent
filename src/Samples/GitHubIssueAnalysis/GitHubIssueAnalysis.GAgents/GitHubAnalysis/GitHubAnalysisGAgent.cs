@@ -19,8 +19,7 @@ using GitHubIssueAnalysis.GAgents.GrainInterfaces.Models;
 
 namespace GitHubIssueAnalysis.GAgents.GitHubAnalysis;
 
-// Fix the ImplicitStreamSubscription to use the static StreamNamespace
-[ImplicitStreamSubscription(GitHubAnalysisStream.StreamNamespace)]
+// Remove the ImplicitStreamSubscription attribute
 [Reentrant]
 public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisGAgentState, GitHubAnalysisLogEvent>, IGitHubAnalysisGAgent, IGrainWithGuidKey
 {
@@ -193,30 +192,45 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisGAgentState, GitHub
             {
                 _logger.LogWarning("Received tags event for issue: {IssueId}", item.IssueId);
                 
-                Console.WriteLine("\n========== RECEIVED TAGS EVENT ==========");
+                string timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+                Console.ForegroundColor = ConsoleColor.Magenta;
+                Console.WriteLine($"\n\n========== RECEIVED TAGS EVENT AT {timestamp} ==========");
+                Console.ResetColor();
+                
                 Console.WriteLine($"Repository: {item.Repository}");
                 Console.WriteLine($"Issue: #{item.IssueId} - {item.Title}");
                 Console.WriteLine($"Extraction Time: {DateTime.UtcNow}");
                 
+                Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine("\nEXTRACTED TAGS:");
+                Console.ResetColor();
+                
                 if (item.ExtractedTags != null && item.ExtractedTags.Length > 0)
                 {
                     foreach (var tag in item.ExtractedTags)
                     {
                         Console.WriteLine($"  - {tag}");
                     }
+                    Console.ForegroundColor = ConsoleColor.Green;
                     Console.WriteLine($"\nTotal Tags: {item.ExtractedTags.Length}");
+                    Console.ResetColor();
                 }
                 else
                 {
+                    Console.ForegroundColor = ConsoleColor.Red;
                     Console.WriteLine("  No tags extracted");
+                    Console.ResetColor();
                 }
                 
+                Console.ForegroundColor = ConsoleColor.Magenta;
                 Console.WriteLine("========== END OF TAGS EVENT ==========\n");
+                Console.ResetColor();
             }
             catch (Exception ex)
             {
+                Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine($"ERROR in TagsStreamObserver: {ex.Message}");
+                Console.ResetColor();
                 _logger.LogError(ex, "Error processing tags event in stream observer");
             }
             
@@ -262,12 +276,19 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisGAgentState, GitHub
                 _logger.LogWarning("====================================================");
                 
                 // Console display for the client
-                Console.WriteLine("\n\n========== RECEIVED REPOSITORY ANALYSIS ==========");
+                string timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+                Console.ForegroundColor = ConsoleColor.Blue;
+                Console.WriteLine($"\n\n========== RECEIVED REPOSITORY ANALYSIS AT {timestamp} ==========");
+                Console.ResetColor();
+                
                 Console.WriteLine($"Repository: {item.Repository}");
                 Console.WriteLine($"Total Issues: {item.TotalIssues} ({item.OpenIssues} open, {item.ClosedIssues} closed)");
                 Console.WriteLine($"Generated: {item.GeneratedAt}");
                 
+                Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine("\nTOP TAGS:");
+                Console.ResetColor();
+                
                 if (item.TopTags != null && item.TopTags.Length > 0)
                 {
                     foreach (var tag in item.TopTags)
@@ -277,15 +298,23 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisGAgentState, GitHub
                 }
                 else
                 {
+                    Console.ForegroundColor = ConsoleColor.Red;
                     Console.WriteLine("  No tags found");
+                    Console.ResetColor();
                 }
                 
+                Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine("\nRECOMMENDATIONS:");
+                Console.ResetColor();
+                
                 if (item.Recommendations != null && item.Recommendations.Length > 0)
                 {
                     foreach (var rec in item.Recommendations)
                     {
+                        Console.ForegroundColor = ConsoleColor.Green;
                         Console.WriteLine($"\n* {rec.Title} (Priority: {rec.Priority})");
+                        Console.ResetColor();
+                        
                         if (rec.SupportingIssues != null && rec.SupportingIssues.Length > 0)
                         {
                             Console.WriteLine($"  Supporting Issues: {string.Join(", ", rec.SupportingIssues.Select(i => $"#{i}"))}");
@@ -299,10 +328,15 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisGAgentState, GitHub
                 }
                 else
                 {
+                    Console.ForegroundColor = ConsoleColor.Red;
                     Console.WriteLine("  No recommendations generated");
+                    Console.ResetColor();
                 }
                 
+                Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine("\nISSUE ACTIVITY:");
+                Console.ResetColor();
+                
                 if (item.TimeRanges != null && item.TimeRanges.Length > 0)
                 {
                     foreach (var range in item.TimeRanges)
@@ -312,14 +346,20 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisGAgentState, GitHub
                 }
                 else
                 {
+                    Console.ForegroundColor = ConsoleColor.Red;
                     Console.WriteLine("  No activity data available");
+                    Console.ResetColor();
                 }
                 
+                Console.ForegroundColor = ConsoleColor.Blue;
                 Console.WriteLine("\n========== END OF REPOSITORY ANALYSIS ==========\n");
+                Console.ResetColor();
             }
             catch (Exception ex)
             {
+                Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine($"ERROR in SummaryStreamObserver: {ex.Message}");
+                Console.ResetColor();
                 _logger.LogError(ex, "Error processing summary report in stream observer");
             }
             
@@ -369,9 +409,14 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisGAgentState, GitHub
     {
         try
         {
+            // Add a timestamp and more visible event notification
+            string timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+            Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("\n\n********************************************************************");
-            Console.WriteLine("*                   RECEIVED GITHUB ISSUE EVENT                     *");
+            Console.WriteLine($"*          EVENT RECEIVED BY ANALYZER AT {timestamp}           *");
             Console.WriteLine("********************************************************************");
+            Console.ResetColor();
+            
             Console.WriteLine($"REPOSITORY: {@event.IssueInfo.Repository}");
             Console.WriteLine($"ISSUE: #{@event.IssueInfo.Id} - {@event.IssueInfo.Title}");
             Console.WriteLine($"STATUS: {@event.IssueInfo.Status}");
@@ -389,14 +434,21 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisGAgentState, GitHub
             _logger.LogWarning("====================================================");
             
             // Process the event immediately
+            Console.ForegroundColor = ConsoleColor.Yellow;
             Console.WriteLine("\nBEGINNING ISSUE ANALYSIS - THIS MAY TAKE UP TO 30 SECONDS\n");
+            Console.ResetColor();
+            
             await HandleGitHubIssueEventInternalAsync(@event);
             
             // Force summary generation after each event for immediate feedback
             try
             {
                 string repository = @event.IssueInfo.Repository;
+                
+                Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine("\nFORCING SUMMARY GENERATION FOR IMMEDIATE FEEDBACK...");
+                Console.ResetColor();
+                
                 _logger.LogWarning("Forcing summary generation after receiving event for repository: {Repository}", repository);
                 
                 // Wait a moment to ensure tags have been processed
@@ -405,26 +457,36 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisGAgentState, GitHub
                 // Generate summary report
                 await GenerateSummaryReportAsync(repository);
                 
+                Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine("\nSUMMARY REPORT GENERATED AND PUBLISHED TO STREAM\n");
+                Console.ResetColor();
+                
                 _logger.LogWarning("Summary report generated and should be published to stream");
                 
                 // Output clear completion message
+                Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine("\n********************************************************************");
                 Console.WriteLine("*               COMPLETED GITHUB ISSUE ANALYSIS                    *");
                 Console.WriteLine("*                                                                  *");
                 Console.WriteLine("*        Results have been published to the summary stream         *");
                 Console.WriteLine("*     You should see the detailed analysis output above/below      *");
                 Console.WriteLine("********************************************************************\n");
+                Console.ResetColor();
             }
             catch (Exception ex)
             {
+                Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine($"\nERROR IN SUMMARY GENERATION: {ex.Message}");
+                Console.ResetColor();
                 _logger.LogError(ex, "Error generating forced summary after event processing");
             }
         }
         catch (Exception ex)
         {
+            Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine($"\nCRITICAL ERROR IN EVENT HANDLER: {ex.Message}");
+            Console.WriteLine($"Stack trace: {ex.StackTrace}");
+            Console.ResetColor();
             _logger.LogError(ex, "Error in OnNextAsync handler for GitHubIssueEvent");
         }
     }
@@ -625,95 +687,116 @@ public class GitHubAnalysisGAgent : GAgentBase<GitHubAnalysisGAgentState, GitHub
     {
         try
         {
-            Console.WriteLine($"\n\n======== EXTRACTING TAGS FOR ISSUE #{issueInfo.Id}: {issueInfo.Title} ========");
-            _logger.LogWarning("========== STARTING LLM CALL FOR TAG EXTRACTION ==========");
-            _logger.LogWarning("Processing issue: {IssueTitle} (#{IssueId})", issueInfo.Title, issueInfo.Id);
+            // Add visible logging for LLM call
+            Console.ForegroundColor = ConsoleColor.Magenta;
+            Console.WriteLine($"\n[{DateTime.Now:HH:mm:ss.fff}] ==========================================");
+            Console.WriteLine($"EXTRACTING TAGS FOR ISSUE #{issueInfo.Id} USING LLM");
+            Console.WriteLine($"===============================================\n");
+            Console.ResetColor();
             
-            // Create a more effective prompt for better tag extraction
-            string prompt = $@"
-You are analyzing a GitHub issue to extract relevant tags. The tags will be used to categorize issues and identify common themes.
-
-ISSUE DETAILS:
-ID: {issueInfo.Id}
-Title: {issueInfo.Title}
-Description: {issueInfo.Description}
-Status: {issueInfo.Status}
-Repository: {issueInfo.Repository}
-Existing Labels: {string.Join(", ", issueInfo.Labels)}
-
-TASK:
-Extract 5-8 most relevant tags from this issue that describe:
-1. Issue type (bug, feature-request, question, documentation, etc.)
-2. Technical areas (networking, ui, database, authentication, etc.)
-3. Priority level (critical, high, medium, low)
-4. Affected components (if identifiable)
-
-FORMAT REQUIREMENTS:
-- Return ONLY a comma-separated list of tags (no explanations)
-- Use lowercase with hyphens for multi-word tags (e.g. 'feature-request')
-- Be specific and descriptive
-- Include the issue status (open/closed) as one of the tags
-
-EXAMPLE OUTPUT:
-bug, networking, authentication, high-priority, connection-error, open
-";
-
-            Console.WriteLine("Sending LLM prompt for tag extraction...");
-            _logger.LogInformation("Calling LLM service for tag extraction");
-            var tags = await _llmService.CompletePromptAsync(prompt);
+            _logger.LogInformation("Extracting tags for issue {IssueId} using LLM: {Title}", issueInfo.Id, issueInfo.Title);
             
-            Console.WriteLine($"LLM RESPONSE FOR TAGS: {tags}");
-            _logger.LogWarning("LLM Response for tag extraction: {Response}", tags);
+            var tags = new List<string>();
             
-            if (string.IsNullOrWhiteSpace(tags))
+            // Set up a timeout for the LLM API call
+            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(45));
+            var extractTask = Task.Run(async () => 
             {
-                Console.WriteLine("WARNING: LLM returned empty tags, trying simpler prompt");
-                _logger.LogWarning("LLM returned empty tags for issue {IssueId}, trying simpler prompt", issueInfo.Id);
+                // Extract essential info to reduce token size
+                string prompt = GenerateExtractTagsPrompt(issueInfo);
                 
-                // Try a simpler prompt as fallback
-                string simplePrompt = $@"
-Extract 5-8 tags from this GitHub issue:
-Title: {issueInfo.Title}
-Description: {issueInfo.Description}
-Status: {issueInfo.Status}
-
-Return only comma-separated tags.
-";
-                Console.WriteLine("Trying fallback prompt for tag extraction...");
-                tags = await _llmService.CompletePromptAsync(simplePrompt);
-                Console.WriteLine($"FALLBACK LLM RESPONSE: {tags}");
+                Console.WriteLine($"Making LLM API call for tag extraction at {DateTime.Now:HH:mm:ss.fff}");
+                string llmResponse = await _llmService.CompletePromptAsync(prompt);
+                Console.WriteLine($"Completed LLM API call for tag extraction at {DateTime.Now:HH:mm:ss.fff}");
                 
-                if (string.IsNullOrWhiteSpace(tags))
-                {
-                    Console.WriteLine("WARNING: LLM still returned empty tags, falling back to basic extraction");
-                    _logger.LogWarning("LLM still returned empty tags with simpler prompt, falling back to basic extraction");
-                    return ExtractBasicTagsFromIssue(issueInfo);
-                }
-            }
+                return llmResponse;
+            });
             
-            var tagArray = tags.Split(',', StringSplitOptions.RemoveEmptyEntries)
-                .Select(t => t.Trim())
-                .Where(t => !string.IsNullOrWhiteSpace(t))
-                .Distinct()
-                .ToArray();
-                
-            if (tagArray.Length == 0)
+            // Wait for either the completion or the timeout
+            var completedTask = await Task.WhenAny(extractTask, timeoutTask);
+            
+            if (completedTask == timeoutTask)
             {
-                Console.WriteLine("WARNING: No valid tags found, using basic extraction");
-                _logger.LogWarning("No valid tags found after processing LLM response, falling back to basic extraction");
+                _logger.LogWarning("LLM API call for tag extraction timed out after 45 seconds for issue {IssueId}", issueInfo.Id);
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"TAG EXTRACTION LLM CALL TIMED OUT - USING FALLBACK TAGS");
+                Console.ResetColor();
+                
+                // Fall back to basic tag extraction
                 return ExtractBasicTagsFromIssue(issueInfo);
             }
             
-            Console.WriteLine($"EXTRACTED TAGS ({tagArray.Length}): {string.Join(", ", tagArray)}");
-            _logger.LogWarning("Successfully extracted {Count} tags for issue #{IssueId}: {Tags}", 
-                tagArray.Length, issueInfo.Id, string.Join(", ", tagArray));
+            // Get the result from the completed task
+            string response = await extractTask;
+            
+            if (string.IsNullOrWhiteSpace(response))
+            {
+                _logger.LogWarning("LLM response for tag extraction was empty for issue {IssueId}, using fallback", issueInfo.Id);
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"EMPTY LLM RESPONSE - USING FALLBACK TAGS");
+                Console.ResetColor();
                 
-            return tagArray;
+                return ExtractBasicTagsFromIssue(issueInfo);
+            }
+
+            // Try to parse tags from response with different formats
+            response = response.Trim();
+            
+            // Check for comma-separated list (most common format)
+            if (response.Contains(",")) 
+            {
+                tags = response.Split(',').Select(t => t.Trim()).ToList();
+            }
+            // Check for line-by-line format
+            else if (response.Contains('\n')) 
+            {
+                tags = response.Split('\n').Select(t => t.Trim()).ToList();
+            }
+            // If single tag or unrecognized format
+            else 
+            {
+                tags.Add(response.Trim());
+            }
+
+            // Clean up tags, remove empty tags and limit count
+            tags = tags
+                .Where(tag => !string.IsNullOrWhiteSpace(tag))
+                .Select(tag => tag.Replace("`", "").Replace("#", "").Replace("*", "").Trim()) // Remove Markdown formatting
+                .Where(tag => !string.IsNullOrWhiteSpace(tag))
+                .Distinct()
+                .Take(10) // Limit to 10 tags max
+                .ToList();
+            
+            // If we couldn't extract tags, fallback to basic extraction
+            if (tags.Count == 0)
+            {
+                _logger.LogWarning("Failed to extract tags from LLM response for issue {IssueId}, using fallback", issueInfo.Id);
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"NO VALID TAGS EXTRACTED - USING FALLBACK TAGS");
+                Console.ResetColor();
+                
+                return ExtractBasicTagsFromIssue(issueInfo);
+            }
+            
+            _logger.LogInformation("Successfully extracted {TagCount} tags for issue {IssueId} using LLM", 
+                tags.Count, issueInfo.Id);
+                
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"SUCCESSFULLY EXTRACTED {tags.Count} TAGS: {string.Join(", ", tags)}");
+            Console.ResetColor();
+            
+            return tags.ToArray();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"ERROR: Tag extraction failed: {ex.Message}");
-            _logger.LogError(ex, "Error extracting tags using LLM for issue {IssueId}, falling back to basic extraction", issueInfo.Id);
+            _logger.LogError(ex, "Error extracting tags using LLM for issue {IssueId}, falling back to basic extraction", 
+                issueInfo.Id);
+            
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"ERROR EXTRACTING TAGS: {ex.Message}");
+            Console.WriteLine("USING FALLBACK TAG EXTRACTION");
+            Console.ResetColor();
+            
             return ExtractBasicTagsFromIssue(issueInfo);
         }
     }
@@ -823,7 +906,7 @@ Return only comma-separated tags.
         }
     }
 
-    private async Task GenerateSummaryReportAsync(string repository)
+    public async Task GenerateSummaryReportAsync(string repository)
     {
         try
         {
@@ -1108,170 +1191,211 @@ Return only comma-separated tags.
     {
         try
         {
-            Console.WriteLine($"\n\n======== GENERATING RECOMMENDATIONS FOR REPOSITORY: {repository} ========");
-            _logger.LogInformation("Generating recommendations for repository {Repository}, considering top {Count} issues", 
-                repository, topIssuesCount);
+            // Add visible logging for LLM call
+            Console.ForegroundColor = ConsoleColor.Magenta;
+            Console.WriteLine($"\n[{DateTime.Now:HH:mm:ss.fff}] ==========================================");
+            Console.WriteLine($"GENERATING RECOMMENDATIONS FOR REPOSITORY {repository} USING LLM");
+            Console.WriteLine($"===============================================\n");
+            Console.ResetColor();
             
-            if (!State.RepositoryIssues.ContainsKey(repository) || State.RepositoryIssues[repository].Count == 0)
+            _logger.LogInformation("Getting recommendations for repository {Repository} using LLM");
+            
+            // Get all issues for the repository
+            var issues = await GetIssuesForRepositoryAsync(repository);
+            if (issues == null || issues.Count == 0)
             {
-                Console.WriteLine($"ERROR: No issues found for repository {repository}");
                 _logger.LogWarning("No issues found for repository {Repository}, cannot generate recommendations", repository);
-                return Array.Empty<IssueRecommendation>();
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"NO ISSUES FOUND - USING FALLBACK RECOMMENDATIONS");
+                Console.ResetColor();
+                
+                return CreateBasicRecommendations(repository, new List<GrainInterfaces.Models.GitHubIssueInfo>());
             }
-
-            // Get the most recent issues, sorted by creation date
-            var recentIssues = State.RepositoryIssues[repository]
+            
+            // Take the most recent issues for analysis
+            var recentIssues = issues
                 .OrderByDescending(i => i.CreatedAt)
-                .Take(topIssuesCount)
+                .Take(Math.Min(issues.Count, 20)) // Limit to 20 most recent issues
                 .ToList();
+
+            // Generate prompt for recommendations
+            string prompt = GenerateRecommendationsPrompt(repository, recentIssues, topIssuesCount);
             
-            Console.WriteLine($"Found {recentIssues.Count} recent issues to analyze for recommendations");
-            
-            if (recentIssues.Count == 0)
+            // Set up a timeout for the LLM API call
+            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(60)); // Longer timeout for recommendations
+            var recommendTask = Task.Run(async () => 
             {
-                Console.WriteLine($"ERROR: No recent issues found for repository {repository}");
-                _logger.LogWarning("No recent issues found for repository {Repository}, cannot generate recommendations", repository);
-                return Array.Empty<IssueRecommendation>();
-            }
-
-            // Extract tags for all these issues
-            var issuesWithTags = new List<(GrainInterfaces.Models.GitHubIssueInfo Issue, List<string> Tags)>();
-            foreach (var issue in recentIssues)
-            {
-                if (State.IssueTags.ContainsKey(repository) && 
-                    State.IssueTags[repository].ContainsKey(issue.Id))
-                {
-                    Console.WriteLine($"Using existing tags for issue #{issue.Id}");
-                    issuesWithTags.Add((issue, State.IssueTags[repository][issue.Id]));
-                }
-                else
-                {
-                    // If tags haven't been extracted yet, do it now
-                    try
-                    {
-                        Console.WriteLine($"Tags not found for issue #{issue.Id}, extracting now");
-                        _logger.LogInformation("Tags not found for issue #{IssueId}, extracting now", issue.Id);
-                        var tags = await ExtractTagsUsingLLMAsync(issue);
-                        issuesWithTags.Add((issue, tags.ToList()));
-                        
-                        // Store for future use
-                        if (!State.IssueTags.ContainsKey(repository))
-                        {
-                            State.IssueTags[repository] = new Dictionary<string, List<string>>();
-                        }
-                        State.IssueTags[repository][issue.Id] = tags.ToList();
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"ERROR: Failed to extract tags for issue #{issue.Id}: {ex.Message}");
-                        _logger.LogError(ex, "Failed to extract tags for issue #{IssueId}, using empty tag list", issue.Id);
-                        issuesWithTags.Add((issue, new List<string>()));
-                    }
-                }
-            }
-
-            Console.WriteLine("Preparing issue summaries for LLM prompt...");
-            var issuesText = string.Join("\n\n", issuesWithTags.Select(it => 
-                $"Issue #{it.Issue.Id}: {it.Issue.Title}\n" +
-                $"Created: {it.Issue.CreatedAt}\n" +
-                $"Description: {it.Issue.Description?.Substring(0, Math.Min(it.Issue.Description?.Length ?? 0, 500)) ?? "No description"}\n" +
-                $"Tags: {string.Join(", ", it.Tags)}"
-            ));
-
-            // Build a comprehensive prompt for the LLM
-            var prompt = $@"
-I need you to analyze GitHub issues from the repository '{repository}' and provide actionable recommendations.
-
-Here are the most recent issues:
-
-{issuesText}
-
-Based on these issues, please provide THREE specific, actionable recommendations for the repository maintainers.
-For each recommendation:
-1. Provide a clear, concise title (max 100 characters)
-2. Write a detailed description explaining the reasoning behind the recommendation (100-300 words)
-3. List any specific issues that support this recommendation
-4. Assign a priority level (High, Medium, Low) based on urgency and impact
-
-FORMAT YOUR RESPONSE EXACTLY AS FOLLOWS:
-```
-RECOMMENDATION 1:
-Title: [Short descriptive title]
-Priority: [High/Medium/Low]
-Description: [Detailed explanation]
-Supporting Issues: [List of issue numbers]
-
-RECOMMENDATION 2:
-Title: [Short descriptive title]
-Priority: [High/Medium/Low]
-Description: [Detailed explanation]
-Supporting Issues: [List of issue numbers]
-
-RECOMMENDATION 3:
-Title: [Short descriptive title]
-Priority: [High/Medium/Low]
-Description: [Detailed explanation]
-Supporting Issues: [List of issue numbers]
-```
-
-IMPORTANT: Ensure your recommendations are SPECIFIC and ACTIONABLE. Do not provide generic advice.
-";
-
-            Console.WriteLine("Sending LLM prompt for recommendations...");
-            _logger.LogInformation("Calling LLM for repository recommendations analysis");
-            var llmResponse = await _llmService.CompletePromptAsync(prompt);
-            Console.WriteLine($"\nRECEIVED LLM RESPONSE OF LENGTH: {llmResponse?.Length ?? 0} CHARACTERS");
-            _logger.LogInformation("Received LLM response for recommendations, processing");
-
-            if (string.IsNullOrEmpty(llmResponse))
-            {
-                Console.WriteLine("WARNING: Received empty response from LLM, trying simpler prompt");
-                _logger.LogWarning("Received empty response from LLM for recommendations, trying simplified prompt");
+                Console.WriteLine($"Making LLM API call for recommendations at {DateTime.Now:HH:mm:ss.fff}");
+                string llmResponse = await _llmService.CompletePromptAsync(prompt);
+                Console.WriteLine($"Completed LLM API call for recommendations at {DateTime.Now:HH:mm:ss.fff}");
                 
-                // Simplified fallback prompt
-                var fallbackPrompt = $@"
-Analyze these GitHub issues and provide 3 actionable recommendations:
-
-{issuesText}
-
-Format: For each recommendation, include:
-1. Title (one line)
-2. Priority (High/Medium/Low)
-3. Description (brief paragraph)
-4. Supporting Issues (list of numbers)
-";
-                Console.WriteLine("Sending fallback LLM prompt for recommendations...");
-                llmResponse = await _llmService.CompletePromptAsync(fallbackPrompt);
-                Console.WriteLine($"\nRECEIVED FALLBACK LLM RESPONSE OF LENGTH: {llmResponse?.Length ?? 0} CHARACTERS");
-                
-                if (string.IsNullOrEmpty(llmResponse))
-                {
-                    Console.WriteLine("ERROR: Failed to get any recommendations from LLM");
-                    _logger.LogError("Failed to get recommendations from LLM with fallback prompt");
-                    return Array.Empty<IssueRecommendation>();
-                }
-            }
-
-            Console.WriteLine($"\nLLM RESPONSE FOR RECOMMENDATIONS:\n{llmResponse}");
+                return llmResponse;
+            });
             
-            // Process the response into structured recommendations
-            var recommendations = ParseRecommendationsFromLLMResponse(llmResponse, recentIssues);
+            // Wait for either the completion or the timeout
+            var completedTask = await Task.WhenAny(recommendTask, timeoutTask);
             
-            Console.WriteLine($"\nFINAL RECOMMENDATIONS ({recommendations.Length}):");
-            foreach (var rec in recommendations)
+            if (completedTask == timeoutTask)
             {
-                Console.WriteLine($"\n* {rec.Title} (Priority: {rec.Priority})");
-                Console.WriteLine($"  Supporting Issues: {string.Join(", ", rec.SupportingIssues.Select(i => $"#{i}"))}");
-                Console.WriteLine($"  {rec.Description.Substring(0, Math.Min(rec.Description.Length, 100))}...");
+                _logger.LogWarning("LLM API call for recommendations timed out after 60 seconds for repository {Repository}", repository);
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"RECOMMENDATIONS LLM CALL TIMED OUT - USING FALLBACK RECOMMENDATIONS");
+                Console.ResetColor();
+                
+                // Fall back to basic recommendations
+                return CreateBasicRecommendations(repository, recentIssues);
             }
+            
+            // Get the result from the completed task
+            string response = await recommendTask;
+            
+            if (string.IsNullOrWhiteSpace(response))
+            {
+                _logger.LogWarning("LLM response for recommendations was empty for repository {Repository}, using fallback", repository);
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"EMPTY LLM RESPONSE - USING FALLBACK RECOMMENDATIONS");
+                Console.ResetColor();
+                
+                return CreateBasicRecommendations(repository, recentIssues);
+            }
+            
+            // Try to parse recommendations from the response
+            var recommendations = ParseRecommendationsFromLLMResponse(response, recentIssues);
+            
+            if (recommendations == null || recommendations.Length == 0)
+            {
+                _logger.LogWarning("Failed to parse recommendations from LLM response for repository {Repository}, using fallback", 
+                    repository);
+                
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"NO VALID RECOMMENDATIONS PARSED - USING FALLBACK RECOMMENDATIONS");
+                Console.ResetColor();
+                
+                return CreateBasicRecommendations(repository, recentIssues);
+            }
+            
+            _logger.LogInformation("Successfully generated {Count} recommendations for repository {Repository} using LLM", 
+                recommendations.Length, repository);
+                
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"SUCCESSFULLY GENERATED {recommendations.Length} RECOMMENDATIONS");
+            Console.ResetColor();
             
             return recommendations;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"ERROR: Failed to generate recommendations: {ex.Message}");
-            _logger.LogError(ex, "Failed to generate recommendations using LLM: {Message}", ex.Message);
-            return Array.Empty<IssueRecommendation>();
+            _logger.LogError(ex, "Error getting recommendations using LLM for repository {Repository}, falling back to basic recommendations", 
+                repository);
+            
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"ERROR GENERATING RECOMMENDATIONS: {ex.Message}");
+            Console.WriteLine("USING FALLBACK RECOMMENDATION GENERATION");
+            Console.ResetColor();
+            
+            // Fall back to basic recommendations
+            var issues = await GetIssuesForRepositoryAsync(repository);
+            var recentIssues = (issues ?? new List<GrainInterfaces.Models.GitHubIssueInfo>())
+                .OrderByDescending(i => i.CreatedAt)
+                .Take(Math.Min(issues?.Count ?? 0, 20))
+                .ToList();
+            
+            return CreateBasicRecommendations(repository, recentIssues);
+        }
+    }
+
+    // Helper method to create basic recommendations when LLM fails
+    private IssueRecommendation[] CreateBasicRecommendations(string repository, List<GrainInterfaces.Models.GitHubIssueInfo> recentIssues)
+    {
+        try
+        {
+            Console.WriteLine("Creating basic recommendations based on issue content");
+            _logger.LogInformation("Creating basic recommendations for repository {Repository}", repository);
+            
+            var recommendations = new List<IssueRecommendation>();
+            
+            // Check if there are open issues
+            var openIssues = recentIssues.Where(i => i.State == "open").ToList();
+            if (openIssues.Any())
+            {
+                recommendations.Add(new IssueRecommendation
+                {
+                    Title = "Address Open Issues",
+                    Description = $"There are {openIssues.Count} open issues that need attention. Prioritize addressing these open issues to improve user experience and maintain repository health.",
+                    Priority = Priority.High,
+                    SupportingIssues = openIssues.Select(i => i.Id).ToArray()
+                });
+            }
+            
+            // Check for feature requests
+            var featureIssues = recentIssues.Where(i => 
+                (i.Title?.Contains("feature", StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (i.Description?.Contains("feature", StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (i.Title?.Contains("add", StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (i.Title?.Contains("implement", StringComparison.OrdinalIgnoreCase) ?? false)
+            ).ToList();
+            
+            if (featureIssues.Any())
+            {
+                recommendations.Add(new IssueRecommendation
+                {
+                    Title = "Evaluate Feature Requests",
+                    Description = $"There are {featureIssues.Count} issues that appear to be feature requests. Review these requests to determine which would provide the most value to users and prioritize their implementation.",
+                    Priority = Priority.Medium,
+                    SupportingIssues = featureIssues.Select(i => i.Id).ToArray()
+                });
+            }
+            
+            // Check for potential bugs
+            var bugIssues = recentIssues.Where(i => 
+                (i.Title?.Contains("bug", StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (i.Description?.Contains("bug", StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (i.Title?.Contains("error", StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (i.Title?.Contains("fix", StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (i.Title?.Contains("crash", StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (i.Title?.Contains("problem", StringComparison.OrdinalIgnoreCase) ?? false)
+            ).ToList();
+            
+            if (bugIssues.Any())
+            {
+                recommendations.Add(new IssueRecommendation
+                {
+                    Title = "Fix Reported Bugs",
+                    Description = $"There are {bugIssues.Count} issues that appear to be bug reports. Investigate and fix these issues to improve stability and user satisfaction.",
+                    Priority = Priority.High,
+                    SupportingIssues = bugIssues.Select(i => i.Id).ToArray()
+                });
+            }
+            
+            // Add a general recommendation if we don't have enough
+            if (recommendations.Count < 3)
+            {
+                recommendations.Add(new IssueRecommendation
+                {
+                    Title = "Review Recent Repository Activity",
+                    Description = "Review the most recent issues to identify common themes and user needs. Regular review of repository activity helps maintain quality and ensures user concerns are addressed promptly.",
+                    Priority = Priority.Medium,
+                    SupportingIssues = recentIssues.Select(i => i.Id).ToArray()
+                });
+            }
+            
+            return recommendations.Take(3).ToArray();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error creating basic recommendations for repository {Repository}", repository);
+            
+            // Return a single failsafe recommendation
+            return new[] 
+            {
+                new IssueRecommendation
+                {
+                    Title = "Review Repository Issues",
+                    Description = "We recommend manually reviewing the repository issues to identify patterns and prioritize work.",
+                    Priority = Priority.Medium,
+                    SupportingIssues = recentIssues.Select(i => i.Id).ToArray()
+                }
+            };
         }
     }
 
@@ -1438,10 +1562,115 @@ Format: For each recommendation, include:
         _logger.LogError(ex, "Stream error notification received");
         return Task.CompletedTask;
     }
+
+    // Helper method to generate a structured prompt for tag extraction
+    private string GenerateExtractTagsPrompt(GrainInterfaces.Models.GitHubIssueInfo issueInfo)
+    {
+        return $@"Analyze the following GitHub issue and extract a list of tags/themes (5-10 tags).
+The tags should categorize the issue and identify key themes that could help development teams prioritize their work.
+Focus on extracting technical concepts, feature areas, priorities, and issue types.
+
+GITHUB ISSUE:
+ID: {issueInfo.Id}
+Title: {issueInfo.Title}
+Repository: {issueInfo.Repository}
+Status: {issueInfo.Status}
+State: {issueInfo.State}
+
+Description:
+{issueInfo.Description?.Substring(0, Math.Min(issueInfo.Description?.Length ?? 0, 2000)) ?? "(No description provided)"}
+
+Existing labels: {(issueInfo.Labels != null && issueInfo.Labels.Length > 0 ? string.Join(", ", issueInfo.Labels) : "None")}
+
+OUTPUT INSTRUCTIONS:
+1. Return ONLY a comma-separated list of tags (maximum 10 tags).
+2. Do not include any explanations, headers, or additional text.
+3. Each tag should be a single word or short phrase (1-3 words).
+4. Include both technical tags and priority/category tags.
+5. Format examples: bug, enhancement, documentation, high-priority, ui, api, performance, security, etc.
+
+Extract and return these tags as a simple comma-separated list:";
+    }
+
+    // Helper method to generate a structured prompt for repository recommendations
+    private string GenerateRecommendationsPrompt(string repository, List<GrainInterfaces.Models.GitHubIssueInfo> recentIssues, int topIssuesCount)
+    {
+        var sb = new System.Text.StringBuilder();
+        
+        sb.AppendLine($@"Analyze the following GitHub issues from the repository '{repository}' and generate {topIssuesCount} prioritized recommendations for the development team.
+
+REPOSITORY: {repository}
+TOTAL ISSUES: {recentIssues.Count}
+
+ISSUES TO ANALYZE:");
+
+        // Include at most 15 issues to keep the prompt size reasonable
+        foreach (var issue in recentIssues.Take(15))
+        {
+            sb.AppendLine($@"
+Issue #{issue.Id}
+Title: {issue.Title}
+Status: {issue.State}
+Created: {issue.CreatedAt:yyyy-MM-dd}
+Labels: {(issue.Labels != null && issue.Labels.Length > 0 ? string.Join(", ", issue.Labels) : "None")}
+Description Summary: {issue.Description?.Substring(0, Math.Min(issue.Description?.Length ?? 0, 300)) ?? "(No description provided)"}
+");
+        }
+
+        sb.AppendLine($@"
+Based on the issues above, generate {topIssuesCount} clear recommendations for the development team.
+Each recommendation should:
+1. Address common themes or important issues
+2. Have a clear, actionable title
+3. Include a priority level (High, Medium, or Low)
+4. Provide a concise explanation
+5. Reference supporting issue IDs
+
+FORMAT YOUR RESPONSE AS FOLLOWS:
+
+RECOMMENDATION 1:
+Title: [Clear, actionable title]
+Priority: [High/Medium/Low]
+Description: [2-3 sentence explanation of the recommendation]
+Supporting Issues: [List issue IDs that support this recommendation]
+
+RECOMMENDATION 2:
+Title: [Clear, actionable title]
+Priority: [High/Medium/Low]
+Description: [2-3 sentence explanation of the recommendation]
+Supporting Issues: [List issue IDs that support this recommendation]
+
+... and so on for {topIssuesCount} recommendations.
+
+Focus on providing valuable insights that will help the development team prioritize their work and address the most important issues in the repository.
+");
+
+        return sb.ToString();
+    }
+
+    // Helper method to get issues for a repository
+    private Task<List<GrainInterfaces.Models.GitHubIssueInfo>> GetIssuesForRepositoryAsync(string repository)
+    {
+        List<GrainInterfaces.Models.GitHubIssueInfo> issues = new List<GrainInterfaces.Models.GitHubIssueInfo>();
+        
+        if (State.RepositoryIssues.ContainsKey(repository) && State.RepositoryIssues[repository].Count > 0)
+        {
+            issues = State.RepositoryIssues[repository];
+            _logger.LogInformation("Found {Count} issues for repository {Repository} in state", 
+                issues.Count, repository);
+        }
+        else
+        {
+            _logger.LogWarning("No issues found for repository {Repository} in state", repository);
+        }
+        
+        return Task.FromResult(issues);
+    }
 }
 
 // Fix the interface to not duplicate IAsyncObserver methods
 public interface IGitHubAnalysisGAgent : IGAgent, IAsyncObserver<GitHubIssueEvent>
 {
     Task HandleGitHubIssueEventAsync(GitHubIssueEvent @event);
+    Task GenerateSummaryReportAsync(string repository);
 } 

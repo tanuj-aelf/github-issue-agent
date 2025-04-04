@@ -17,36 +17,175 @@ public class FallbackLLMService : ILLMService
 
     public Task<string> CompletePromptAsync(string prompt)
     {
+        // Add prominent console logging too
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine("\n=================================================================");
+        Console.WriteLine("**** FALLBACK LLM SERVICE ACTIVATED - USING SIMULATED RESPONSES ****");
+        Console.WriteLine("=================================================================\n");
+        Console.ResetColor();
+        
         _logger.LogWarning("========================================================================================");
         _logger.LogWarning("USING FALLBACK LLM SERVICE as no API key was provided - this is just simulated AI output");
         _logger.LogWarning("========================================================================================");
+        _logger.LogWarning("Prompt size: {Size} characters", prompt?.Length ?? 0);
+        _logger.LogWarning("Prompt excerpt: {Excerpt}", prompt?.Length > 100 
+            ? prompt.Substring(0, 100) + "..." 
+            : prompt ?? "empty");
 
-        if (prompt.Contains("extract relevant tags"))
+        string responseType = "unknown";
+        string response = string.Empty;
+
+        // Check for tag extraction prompts - use more patterns for detection
+        if (prompt.Contains("extract relevant tags") || 
+            prompt.Contains("Extract 5-8 most relevant tags") || 
+            prompt.Contains("Extract 5-8 tags") ||
+            (prompt.Contains("Extract") && prompt.Contains("tags")) ||
+            prompt.Contains("Extract tags"))
         {
+            responseType = "tag extraction";
+            _logger.LogWarning("DETECTED TAG EXTRACTION PROMPT");
+            Console.WriteLine("** Processing tag extraction request...");
+            
             // Check if this is for a GitHub issue, and if so, try to extract context
             if (prompt.Contains("Title:") && prompt.Contains("Description:"))
             {
                 // Try to extract some context from the prompt
-                var tags = GenerateContextualTags(prompt);
-                _logger.LogWarning("FallbackLLMService generated contextual tags: {Tags}", tags);
-                return Task.FromResult(tags);
+                response = GenerateContextualTags(prompt);
+                _logger.LogWarning("FallbackLLMService generated contextual tags: {Tags}", response);
+                Console.WriteLine($"** Generated contextual tags: {response}");
             }
             else
             {
-                var tags = GenerateRandomTags();
-                _logger.LogWarning("FallbackLLMService generated random tags: {Tags}", tags);
-                return Task.FromResult(tags);
+                response = GenerateRandomTags();
+                _logger.LogWarning("FallbackLLMService generated random tags: {Tags}", response);
+                Console.WriteLine($"** Generated random tags: {response}");
             }
         }
-        else if (prompt.Contains("provide strategic recommendations"))
+        // Check for recommendation prompts - use more patterns for detection
+        else if (prompt.Contains("provide strategic recommendations") || 
+                 prompt.Contains("provide THREE specific, actionable recommendations") ||
+                 prompt.Contains("provide actionable recommendations") ||
+                 (prompt.Contains("recommendations") && prompt.Contains("repository maintainers")) ||
+                 prompt.Contains("RECOMMENDATION 1:"))
         {
-            var recommendations = GenerateRandomRecommendations();
-            _logger.LogWarning("FallbackLLMService generated recommendations: {Recommendations}", recommendations);
-            return Task.FromResult(recommendations);
+            responseType = "recommendations";
+            _logger.LogWarning("DETECTED RECOMMENDATIONS PROMPT");
+            Console.WriteLine("** Processing recommendations request...");
+            
+            // Generate more structured recommendations based on format in the prompt
+            if (prompt.Contains("RECOMMENDATION 1:") || prompt.Contains("FORMAT YOUR RESPONSE EXACTLY AS FOLLOWS:"))
+            {
+                response = GenerateStructuredRecommendations(prompt);
+                _logger.LogWarning("FallbackLLMService generated structured recommendations of length: {Length}", 
+                    response?.Length ?? 0);
+                Console.WriteLine($"** Generated structured recommendations ({response?.Length ?? 0} chars)");
+            }
+            else
+            {
+                response = GenerateRandomRecommendations();
+                _logger.LogWarning("FallbackLLMService generated simple recommendations: {Recommendations}", 
+                    response?.Length > 100 ? response.Substring(0, 100) + "..." : response);
+                Console.WriteLine($"** Generated simple recommendations");
+            }
+        }
+        else
+        {
+            responseType = "unknown";
+            _logger.LogWarning("FallbackLLMService returning generic message - UNKNOWN PROMPT TYPE");
+            Console.WriteLine("** Unknown prompt type, returning generic message");
+            response = "AI analysis is not available without an API key. Please configure a valid OpenAI API key.";
         }
 
-        _logger.LogWarning("FallbackLLMService returning generic message");
-        return Task.FromResult("AI analysis is not available without an API key. Please configure a valid OpenAI API key.");
+        // Final console output
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"\n** FALLBACK LLM RESPONSE ({responseType}): Response generated successfully");
+        Console.WriteLine("=================================================================\n");
+        Console.ResetColor();
+        
+        return Task.FromResult(response);
+    }
+
+    private string GenerateStructuredRecommendations(string prompt)
+    {
+        _logger.LogInformation("Generating structured recommendations");
+        
+        // Try to extract any repository info or issue information from the prompt
+        string repository = "Unknown Repository";
+        var repoMatch = System.Text.RegularExpressions.Regex.Match(prompt, @"repository '([^']+)'");
+        if (repoMatch.Success)
+        {
+            repository = repoMatch.Groups[1].Value;
+            _logger.LogInformation("Extracted repository: {Repository}", repository);
+        }
+        
+        // Extract issue IDs if available
+        var issueIds = new List<string>();
+        var issueMatches = System.Text.RegularExpressions.Regex.Matches(prompt, @"Issue #(\d+):");
+        foreach (System.Text.RegularExpressions.Match match in issueMatches)
+        {
+            issueIds.Add(match.Groups[1].Value);
+        }
+        
+        _logger.LogInformation("Found {Count} issue references in prompt", issueIds.Count);
+        
+        // Generate 3 structured recommendations with increasing priority
+        var priorities = new[] { "Low", "Medium", "High" };
+        var recommendationTypes = new[] 
+        {
+            "Documentation Improvement", 
+            "API Enhancements", 
+            "Performance Optimization",
+            "Security Hardening",
+            "User Experience Refinement",
+            "Build System Updates",
+            "Test Coverage Expansion",
+            "Mobile Support"
+        };
+        
+        // Generate results with the exact format requested in the prompt
+        var sb = new System.Text.StringBuilder();
+        
+        for (int i = 0; i < 3; i++)
+        {
+            // Select some supporting issues for this recommendation
+            var supportingIssueIds = issueIds
+                .OrderBy(_ => _random.Next())
+                .Take(_random.Next(1, Math.Min(3, issueIds.Count + 1)))
+                .ToList();
+            
+            if (supportingIssueIds.Count == 0 && issueIds.Count > 0)
+            {
+                supportingIssueIds.Add(issueIds[0]);
+            }
+            
+            var recommendationType = recommendationTypes[_random.Next(recommendationTypes.Length)];
+            var title = $"{recommendationType} for {repository}";
+            var priority = priorities[i]; // Use increasing priority
+            
+            sb.AppendLine($"RECOMMENDATION {i+1}:");
+            sb.AppendLine($"Title: {title}");
+            sb.AppendLine($"Priority: {priority}");
+            sb.AppendLine($"Description: This recommendation focuses on {recommendationType.ToLower()} " +
+                $"which will improve the overall quality and usability of the project. " +
+                $"By implementing this recommendation, users will experience better performance, " +
+                $"more reliable operation, and an improved development experience. " +
+                $"The existing issues show that this is an area requiring attention, " +
+                $"and addressing it will provide significant benefits to both users and maintainers.");
+            
+            sb.Append("Supporting Issues: ");
+            if (supportingIssueIds.Count > 0)
+            {
+                sb.AppendLine(string.Join(", ", supportingIssueIds.Select(id => $"#{id}")));
+            }
+            else
+            {
+                sb.AppendLine("General repository improvement");
+            }
+            
+            sb.AppendLine();
+        }
+        
+        return sb.ToString();
     }
 
     private string GenerateContextualTags(string prompt)

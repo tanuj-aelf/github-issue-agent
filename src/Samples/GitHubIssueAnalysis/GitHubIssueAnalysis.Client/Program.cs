@@ -1,17 +1,25 @@
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Configuration;
-using GitHubIssueAnalysis.GAgents.Common;
-using GitHubIssueAnalysis.GAgents.GitHubAnalysis;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Orleans;
+using Orleans.Hosting;
 using Orleans.Runtime;
 using Orleans.Streams;
-using Serilog;
-using Serilog.Events;
+using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Collections.Generic;
 using System.Text;
+using System.Threading.Tasks;
+using Serilog;
+using Serilog.Events;
+
+// Import types with aliases to avoid ambiguity
+using ClientGitHubIssueInfo = GitHubIssueAnalysis.GAgents.GrainInterfaces.Models.GitHubIssueInfo;
+using ClientGitHubIssueEvent = GitHubIssueAnalysis.GAgents.GrainInterfaces.Models.GitHubIssueEvent;
+using ClientRepositorySummaryReport = GitHubIssueAnalysis.GAgents.GrainInterfaces.Models.RepositorySummaryReport;
+using AnalysisGitHubIssueEvent = GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubIssueEvent;
 
 // Load .env file if it exists
 string basePath = AppDomain.CurrentDomain.BaseDirectory;
@@ -89,43 +97,128 @@ var host = Host.CreateDefaultBuilder()
     })
     .Build();
 
-// Start the host
-await host.StartAsync();
+await MainAsync(host);
 
-// Get the client and cluster client
-var gitHubClient = host.Services.GetRequiredService<GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubClient>();
-var clusterClient = host.Services.GetRequiredService<IClusterClient>();
-
-Console.WriteLine("===============================================");
-Console.WriteLine("GitHub Issue Analysis Sample Client");
-Console.WriteLine("===============================================");
-
-bool exitRequested = false;
-
-while (!exitRequested)
+static async Task MainAsync(IHost host)
 {
-    Console.WriteLine("\nPlease choose an option:");
-    Console.WriteLine("1) Analyze GitHub Repository Issues");
-    Console.WriteLine("2) Exit");
-    Console.Write("\nYour choice: ");
-
-    var choice = Console.ReadLine();
-
-    switch (choice)
+    try 
     {
-        case "1":
-            await AnalyzeGitHubRepositoryAsync(clusterClient, gitHubClient);
-            break;
-        case "2":
-            exitRequested = true;
-            break;
-        default:
-            Console.WriteLine("Invalid option. Please try again.");
-            break;
+        // Start the host
+        await host.StartAsync();
+
+        // Get the client and cluster client
+        var gitHubClient = host.Services.GetRequiredService<GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubClient>();
+        var clusterClient = host.Services.GetRequiredService<IClusterClient>();
+
+        Console.WriteLine("===============================================");
+        Console.WriteLine("GitHub Issue Analysis Sample Client");
+        Console.WriteLine("===============================================");
+
+        bool exitRequested = false;
+
+        while (!exitRequested)
+        {
+            Console.WriteLine("\nPlease choose an option:");
+            Console.WriteLine("1) Analyze GitHub Repository Issues");
+            Console.WriteLine("2) Exit");
+            Console.Write("\nYour choice: ");
+
+            var choice = Console.ReadLine();
+
+            switch (choice)
+            {
+                case "1":
+                    await AnalyzeGitHubRepositoryAsync(clusterClient, gitHubClient);
+                    break;
+                case "2":
+                    exitRequested = true;
+                    break;
+                default:
+                    Console.WriteLine("Invalid option. Please try again.");
+                    break;
+            }
+        }
+
+        await host.StopAsync();
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error in MainAsync: {ex.Message}");
+        Console.WriteLine(ex.StackTrace);
     }
 }
 
-await host.StopAsync();
+static async Task PublishIssuesToGAgent(
+    IClusterClient clusterClient, 
+    List<ClientGitHubIssueInfo> issues, 
+    string memoryStreamProviderName = "MemoryStreams")
+{
+    Console.WriteLine("\nProcessing issues...");
+    int processedCount = 0;
+
+    // Get a reference to the analysis grain with a fixed GUID
+    Guid analysisGrainId = Guid.Parse("E0E7DE68-438C-4DE3-9C4E-F6D52D87559E"); // Use fixed GUID for predictable activation
+    var analysisGrain = clusterClient.GetGrain<GitHubIssueAnalysis.GAgents.GitHubAnalysis.IGitHubAnalysisGAgent>(analysisGrainId);
+    Console.WriteLine($"Using analysis grain with ID: {analysisGrainId}");
+    
+    try
+    {
+        Console.WriteLine("Waiting 2 seconds for grain activation before sending first issue...");
+        await Task.Delay(2000); // Give the grain a moment to fully activate
+
+        foreach (var issue in issues)
+        {
+            Console.WriteLine($"Publishing issue: {issue.Title} (#{issue.Id})");
+            
+            try
+            {
+                // Create the event - convert from Model to Common type
+                var commonIssue = new GitHubIssueAnalysis.GAgents.Common.GitHubIssueInfo
+                {
+                    Id = issue.Id,
+                    Title = issue.Title,
+                    Description = issue.Description,
+                    Status = issue.Status,
+                    Repository = issue.Repository,
+                    Url = issue.Url,
+                    CreatedAt = issue.CreatedAt,
+                    Labels = issue.Labels
+                };
+                
+                // Create the event with the correct type
+                var gitHubIssueEvent = new AnalysisGitHubIssueEvent 
+                { 
+                    IssueInfo = commonIssue
+                };
+                
+                // Send the event directly to the grain using RPC instead of streams
+                await analysisGrain.HandleGitHubIssueEventAsync(gitHubIssueEvent);
+                Console.WriteLine("Successfully published via direct grain call");
+                
+                processedCount++;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error publishing issue #{issue.Id}: {ex.Message}");
+                Console.WriteLine(ex.StackTrace);
+            }
+            
+            // Add a small delay between requests
+            await Task.Delay(500);
+        }
+        
+        // After all issues are processed, request the grain to generate a summary report
+        Console.WriteLine("\nRequesting summary analysis...");
+        await analysisGrain.GenerateSummaryReportAsync(issues.First().Repository);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"\nError in publishing process: {ex.Message}");
+        Console.WriteLine(ex.StackTrace);
+    }
+
+    Console.WriteLine($"\nAll issues published for analysis. Successfully processed {processedCount} of {issues.Count} issues.");
+}
 
 static async Task AnalyzeGitHubRepositoryAsync(
     IClusterClient clusterClient, 
@@ -175,14 +268,16 @@ static async Task AnalyzeGitHubRepositoryAsync(
         Console.WriteLine($"\nFetching up to {maxIssues} {issueState} issues from {owner}/{repo}...");
 
         // Fetch issues from GitHub with better error handling
-        List<GitHubIssueInfo> issues;
+        List<GitHubIssueAnalysis.GAgents.Common.GitHubIssueInfo> rawIssues;
+        List<ClientGitHubIssueInfo> issues = new List<ClientGitHubIssueInfo>();
+        
         try
         {
-            issues = await gitHubClient.GetRepositoryIssuesAsync(owner, repo, maxIssues, issueState);
+            rawIssues = await gitHubClient.GetRepositoryIssuesAsync(owner, repo, maxIssues, issueState);
             
-            Console.WriteLine($"Found {issues.Count} issues. Starting analysis...");
+            Console.WriteLine($"Found {rawIssues.Count} issues. Starting analysis...");
 
-            if (issues.Count == 0)
+            if (rawIssues.Count == 0)
             {
                 Console.WriteLine("\n⚠️ No issues found for this repository. This could be because:");
                 Console.WriteLine(" - The repository doesn't have any issues with state: " + issueState);
@@ -191,6 +286,22 @@ static async Task AnalyzeGitHubRepositoryAsync(
                 Console.WriteLine("\nPlease try another repository, issue state, or check the repository name.");
                 return;
             }
+            
+            // Convert to the model's GitHubIssueInfo type
+            issues = rawIssues.Select(issue => new ClientGitHubIssueInfo
+            {
+                Id = issue.Id,
+                Title = issue.Title,
+                Description = issue.Description,
+                Status = issue.Status,
+                State = issue.Status, // Using Status as State
+                Url = issue.Url,
+                Repository = issue.Repository,
+                CreatedAt = issue.CreatedAt,
+                UpdatedAt = DateTime.UtcNow,
+                ClosedAt = issue.Status?.ToLower() == "closed" ? (DateTime?)DateTime.UtcNow : null,
+                Labels = issue.Labels
+            }).ToList();
         }
         catch (Exception ex)
         {
@@ -216,256 +327,113 @@ static async Task AnalyzeGitHubRepositoryAsync(
         Console.WriteLine("Setting up stream subscriptions for summary reports...");
 
         // Create a subscription to the static stream with empty GUID for summary reports
-        var summaryStreamId = StreamId.Create("GitHubAnalysisStream", Guid.Empty);
-        Console.WriteLine($"Subscribing to summary stream: GitHubAnalysisStream/{Guid.Empty}");
+        var summaryStreamId = StreamId.Create(GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubAnalysisStream.StreamNamespace, 
+                                            GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubAnalysisStream.SummaryStreamKey);
+        Console.WriteLine($"Subscribing to summary stream: {GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubAnalysisStream.StreamNamespace}/{GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubAnalysisStream.SummaryStreamKey}");
         
         // Subscribe to MemoryStreams first
         Console.WriteLine("Creating subscription with MemoryStreams provider...");
         var memoryStreamProvider = clusterClient.GetStreamProvider("MemoryStreams");
-        var memoryStream = memoryStreamProvider.GetStream<SummaryReportEvent>(summaryStreamId);
+        var memoryStream = memoryStreamProvider.GetStream<ClientRepositorySummaryReport>(summaryStreamId);
         var memorySubscription = await memoryStream.SubscribeAsync(
-            (summaryEvent, token) =>
+            (summaryReport, token) =>
             {
                 Console.WriteLine("\n===============================================================");
                 Console.WriteLine("              GitHub ISSUE ANALYSIS RESULTS                    ");
                 Console.WriteLine("===============================================================");
-                Console.WriteLine($"Repository: {summaryEvent.Repository}");
-                Console.WriteLine($"Total Issues Analyzed: {summaryEvent.TotalIssuesAnalyzed}");
-                Console.WriteLine($"Analysis Completed: {summaryEvent.GeneratedAt.ToString("g")}");
+                Console.WriteLine($"Repository: {summaryReport.Repository}");
+                Console.WriteLine($"Total Issues Analyzed: {summaryReport.TotalIssues}");
+                Console.WriteLine($"Open Issues: {summaryReport.OpenIssues}, Closed Issues: {summaryReport.ClosedIssues}");
+                Console.WriteLine($"Analysis Completed: {summaryReport.GeneratedAt:g}");
                 
                 Console.WriteLine("\n=== EXTRACTED THEMES ===");
                 Console.WriteLine("The following themes were identified in the repository issues:");
                 
-                // Format tag frequencies into a nice table with percentages
-                var sortedTags = summaryEvent.TagFrequency.OrderByDescending(t => t.Value).ToList();
-                int maxTagWidth = Math.Max(12, sortedTags.Select(t => t.Key.Length).DefaultIfEmpty(0).Max());
-                
-                Console.WriteLine($"\n{"TAG".PadRight(maxTagWidth)} | {"COUNT",-5} | {"PERCENTAGE",-10} | {"GRAPH",-20}");
-                Console.WriteLine(new string('-', maxTagWidth + 42));
-                
-                foreach (var tag in sortedTags)
+                // Format tag statistics into a table
+                if (summaryReport.TopTags != null && summaryReport.TopTags.Length > 0)
                 {
-                    double percentage = (double)tag.Value / summaryEvent.TotalIssuesAnalyzed * 100;
-                    int barLength = (int)(percentage / 5); // 20 chars = 100%
-                    string bar = new string('█', Math.Min(barLength, 20));
+                    int maxTagWidth = Math.Max(12, summaryReport.TopTags.Select(t => t.Tag.Length).DefaultIfEmpty(0).Max());
                     
-                    Console.WriteLine($"{tag.Key.PadRight(maxTagWidth)} | {tag.Value,-5} | {percentage,9:F1}% | {bar}");
-                }
-                
-                Console.WriteLine("\n=== PRIORITY RECOMMENDATIONS ===");
-                Console.WriteLine("Based on the analysis, we recommend focusing on:");
-                
-                for (int i = 0; i < summaryEvent.PriorityRecommendations.Count; i++)
-                {
-                    Console.WriteLine($"{i+1}. {summaryEvent.PriorityRecommendations[i]}");
-                }
-                
-                Console.WriteLine("\n=== ANALYZED ISSUES ===");
-                Console.WriteLine("The following issues were analyzed:");
-                
-                // Group issues by their tags for better insight
-                var issuesByTag = new Dictionary<string, List<IssueDetails>>();
-                foreach (var issue in summaryEvent.AnalyzedIssues)
-                {
-                    foreach (var tag in issue.Tags)
+                    Console.WriteLine($"\n{"TAG".PadRight(maxTagWidth)} | {"COUNT",-5} | {"PERCENTAGE",-10} | {"GRAPH",-20}");
+                    Console.WriteLine(new string('-', maxTagWidth + 42));
+                    
+                    foreach (var tag in summaryReport.TopTags)
                     {
-                        if (!issuesByTag.ContainsKey(tag))
-                        {
-                            issuesByTag[tag] = new List<IssueDetails>();
-                        }
-                        issuesByTag[tag].Add(issue);
-                    }
-                }
-                
-                // Display top 3 most frequent tags with their issues
-                var topTags = summaryEvent.TagFrequency.OrderByDescending(t => t.Value).Take(3).Select(t => t.Key).ToList();
-                
-                foreach (var tag in topTags)
-                {
-                    if (issuesByTag.ContainsKey(tag))
-                    {
-                        Console.WriteLine($"\nIssues tagged with '{tag}':");
-                        foreach (var issue in issuesByTag[tag].Take(5)) // Show up to 5 issues per tag
-                        {
-                            Console.WriteLine($"  - #{issue.Id}: {issue.Title}");
-                            Console.WriteLine($"    URL: {issue.Url}");
-                        }
+                        double percentage = (double)tag.Count / summaryReport.TotalIssues * 100;
+                        int barLength = (int)(percentage / 5); // 20 chars = 100%
+                        string bar = new string('█', Math.Min(barLength, 20));
                         
-                        if (issuesByTag[tag].Count > 5)
-                        {
-                            Console.WriteLine($"    ... and {issuesByTag[tag].Count - 5} more");
-                        }
+                        Console.WriteLine($"{tag.Tag.PadRight(maxTagWidth)} | {tag.Count,-5} | {percentage,9:F1}% | {bar}");
                     }
                 }
+                else
+                {
+                    Console.WriteLine("No tags were extracted from the issues.");
+                }
                 
-                Console.WriteLine("\n===============================================================");
-                Console.WriteLine("                     END OF ANALYSIS                          ");
+                // Show recommendations
+                if (summaryReport.Recommendations != null && summaryReport.Recommendations.Length > 0)
+                {
+                    Console.WriteLine("\n=== RECOMMENDATIONS ===");
+                    int i = 1;
+                    foreach (var rec in summaryReport.Recommendations)
+                    {
+                        Console.WriteLine($"{i}. {rec.Title} [{rec.Priority}]");
+                        Console.WriteLine($"   {rec.Description}");
+                        Console.WriteLine();
+                        i++;
+                    }
+                }
+                else 
+                {
+                    Console.WriteLine("\n=== RECOMMENDATIONS ===");
+                    Console.WriteLine("No specific recommendations were generated.");
+                }
+                
                 Console.WriteLine("===============================================================");
                 
                 return Task.CompletedTask;
             });
         Console.WriteLine("Successfully created subscription to summary stream with MemoryStreams");
-        
-        // Also subscribe to Aevatar stream for redundancy
-        Console.WriteLine("Creating subscription with Aevatar provider...");
-        var aevatarProvider = clusterClient.GetStreamProvider("Aevatar");
-        var aevatarStream = aevatarProvider.GetStream<SummaryReportEvent>(summaryStreamId);
-        var aevatarSubscription = await aevatarStream.SubscribeAsync(
-            (summaryEvent, token) =>
-            {
-                Console.WriteLine("\n===============================================================");
-                Console.WriteLine("              GitHub ISSUE ANALYSIS RESULTS                    ");
-                Console.WriteLine("===============================================================");
-                Console.WriteLine($"Repository: {summaryEvent.Repository}");
-                Console.WriteLine($"Total Issues Analyzed: {summaryEvent.TotalIssuesAnalyzed}");
-                Console.WriteLine($"Analysis Completed: {summaryEvent.GeneratedAt.ToString("g")}");
-                
-                Console.WriteLine("\n=== EXTRACTED THEMES ===");
-                Console.WriteLine("The following themes were identified in the repository issues:");
-                
-                // Format tag frequencies into a nice table with percentages
-                var sortedTags = summaryEvent.TagFrequency.OrderByDescending(t => t.Value).ToList();
-                int maxTagWidth = Math.Max(12, sortedTags.Select(t => t.Key.Length).DefaultIfEmpty(0).Max());
-                
-                Console.WriteLine($"\n{"TAG".PadRight(maxTagWidth)} | {"COUNT",-5} | {"PERCENTAGE",-10} | {"GRAPH",-20}");
-                Console.WriteLine(new string('-', maxTagWidth + 42));
-                
-                foreach (var tag in sortedTags)
-                {
-                    double percentage = (double)tag.Value / summaryEvent.TotalIssuesAnalyzed * 100;
-                    int barLength = (int)(percentage / 5); // 20 chars = 100%
-                    string bar = new string('█', Math.Min(barLength, 20));
-                    
-                    Console.WriteLine($"{tag.Key.PadRight(maxTagWidth)} | {tag.Value,-5} | {percentage,9:F1}% | {bar}");
-                }
-                
-                Console.WriteLine("\n=== PRIORITY RECOMMENDATIONS ===");
-                Console.WriteLine("Based on the analysis, we recommend focusing on:");
-                
-                for (int i = 0; i < summaryEvent.PriorityRecommendations.Count; i++)
-                {
-                    Console.WriteLine($"{i+1}. {summaryEvent.PriorityRecommendations[i]}");
-                }
-                
-                Console.WriteLine("\n=== ANALYZED ISSUES ===");
-                Console.WriteLine("The following issues were analyzed:");
-                
-                // Group issues by their tags for better insight
-                var issuesByTag = new Dictionary<string, List<IssueDetails>>();
-                foreach (var issue in summaryEvent.AnalyzedIssues)
-                {
-                    foreach (var tag in issue.Tags)
-                    {
-                        if (!issuesByTag.ContainsKey(tag))
-                        {
-                            issuesByTag[tag] = new List<IssueDetails>();
-                        }
-                        issuesByTag[tag].Add(issue);
-                    }
-                }
-                
-                // Display top 3 most frequent tags with their issues
-                var topTags = summaryEvent.TagFrequency.OrderByDescending(t => t.Value).Take(3).Select(t => t.Key).ToList();
-                
-                foreach (var tag in topTags)
-                {
-                    if (issuesByTag.ContainsKey(tag))
-                    {
-                        Console.WriteLine($"\nIssues tagged with '{tag}':");
-                        foreach (var issue in issuesByTag[tag].Take(5)) // Show up to 5 issues per tag
-                        {
-                            Console.WriteLine($"  - #{issue.Id}: {issue.Title}");
-                            Console.WriteLine($"    URL: {issue.Url}");
-                        }
-                        
-                        if (issuesByTag[tag].Count > 5)
-                        {
-                            Console.WriteLine($"    ... and {issuesByTag[tag].Count - 5} more");
-                        }
-                    }
-                }
-                
-                Console.WriteLine("\n===============================================================");
-                Console.WriteLine("                     END OF ANALYSIS                          ");
-                Console.WriteLine("===============================================================");
-                
-                return Task.CompletedTask;
-            });
-        Console.WriteLine("Successfully created subscription to summary stream with Aevatar");
 
+        // Try the Aevatar provider as well
         try
         {
-            // Get the stream for publishing issues using the correct namespace and ID
-            var issuesStreamId = StreamId.Create("GitHubAnalysisStream", Guid.Parse("22222222-2222-2222-2222-222222222222"));
-            Console.WriteLine($"Publishing issues to stream: GitHubAnalysisStream/22222222-2222-2222-2222-222222222222");
-            var issuesStream = memoryStreamProvider.GetStream<GitHubIssueEvent>(issuesStreamId);
-            
-            // Process each issue - we're now just using one stream to avoid duplicate processing
-            Console.WriteLine("\nProcessing issues...");
-            int processedCount = 0;
-            
-            foreach (var issue in issues)
-            {
-                Console.WriteLine($"Publishing issue: {issue.Title} (#{issue.Id})");
-                
-                // Create the event to send 
-                var gitHubIssueEvent = new GitHubIssueEvent 
-                { 
-                    IssueInfo = issue 
-                };
-                
-                // Add extra delay to allow the grain to activate and subscribe
-                if (issue == issues.First())
+            Console.WriteLine("Creating subscription with Aevatar provider...");
+            var aevatarStreamProvider = clusterClient.GetStreamProvider("Aevatar");
+            var aevatarStream = aevatarStreamProvider.GetStream<ClientRepositorySummaryReport>(summaryStreamId);
+            var aevatarSubscription = await aevatarStream.SubscribeAsync(
+                (summaryReport, token) =>
                 {
-                    Console.WriteLine("Waiting 2 seconds for grain activation before sending first issue...");
-                    await Task.Delay(2000);
-                }
-                
-                try
-                {
-                    Console.WriteLine("Publishing to MemoryStreams provider...");
-                    await issuesStream.OnNextAsync(gitHubIssueEvent);
-                    Console.WriteLine("Successfully published to MemoryStreams");
-                    processedCount++;
-                    
-                    // Add delay between issues to avoid overwhelming the agent - increased for better processing
-                    await Task.Delay(1500); 
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Error publishing issue: {ex.Message}");
-                }
-            }
-            
-            Console.WriteLine($"\nAll issues published for analysis. Successfully processed {processedCount} of {issues.Count} issues.");
-            
-            // Add a more informative wait message with counter
-            Console.WriteLine("\nWaiting for the analysis to complete...");
-            Console.WriteLine("This may take up to 30 seconds for the LLM to process the data.");
-            
-            // Display a simple progress indicator
-            for (int i = 0; i < 15; i++)
-            {
-                Console.Write(".");
-                await Task.Delay(1000);
-                
-                // Every 5 seconds, give a status update
-                if (i % 5 == 4)
-                {
-                    Console.WriteLine(" Still processing");
-                }
-            }
-            
-            Console.WriteLine("\nAnalysis should be complete. If results aren't displayed above, press Enter to continue...");
-            Console.ReadLine();
+                    // Same handler as above, but we can just log that we received it through Aevatar
+                    Console.WriteLine("Received summary report through Aevatar provider");
+                    return Task.CompletedTask;
+                });
+            Console.WriteLine("Successfully created subscription to summary stream with Aevatar");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error during stream setup or publishing: {ex.Message}");
+            Console.WriteLine($"Failed to create subscription with Aevatar provider: {ex.Message}");
         }
+
+        // Use the new method to publish issues directly to the grain
+        await PublishIssuesToGAgent(clusterClient, issues, "MemoryStreams");
+
+        Console.WriteLine("\nWaiting for the analysis to complete...");
+        Console.WriteLine("This may take up to 30 seconds for the LLM to process the data.");
+        
+        // Wait for a while to see if we get any responses
+        for (int i = 0; i < 6; i++)
+        {
+            await Task.Delay(5000);
+            Console.WriteLine("..... Still processing");
+        }
+        
+        Console.WriteLine("\nAnalysis should be complete. If results aren't displayed above, press Enter to continue...");
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"An unexpected error occurred: {ex.Message}");
+        Console.WriteLine($"Error during analysis: {ex.Message}");
+        Console.WriteLine(ex.StackTrace);
     }
 } 

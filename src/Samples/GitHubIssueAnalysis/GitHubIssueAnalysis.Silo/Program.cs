@@ -38,9 +38,14 @@ Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Override("Orleans", LogEventLevel.Warning)
     .MinimumLevel.Override("Orleans.Runtime", LogEventLevel.Warning)
     .MinimumLevel.Override("Orleans.Providers", LogEventLevel.Warning)
+    // Add more detailed logging for our components
+    .MinimumLevel.Override("GitHubIssueAnalysis", LogEventLevel.Debug)
+    .MinimumLevel.Override("GitHubIssueAnalysis.GAgents.Services", LogEventLevel.Debug)
     .Enrich.FromLogContext()
-    .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}")
+    .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] [{SourceContext}] {Message:lj}{NewLine}{Exception}")
     .CreateLogger();
+
+Console.WriteLine("***** STARTING GITHUB ISSUE ANALYSIS SILO WITH DEBUG LOGGING ENABLED *****");
 
 var builder = Host.CreateDefaultBuilder(args)
     .ConfigureAppConfiguration((hostContext, config) =>
@@ -70,6 +75,11 @@ var builder = Host.CreateDefaultBuilder(args)
             {
                 logging.AddConsole();
                 logging.SetMinimumLevel(LogLevel.Debug);
+                
+                // Configure specific namespace logging levels
+                logging.AddFilter("GitHubIssueAnalysis", LogLevel.Debug);
+                logging.AddFilter("GitHubIssueAnalysis.GAgents.Services", LogLevel.Debug);
+                logging.AddFilter("GitHubIssueAnalysis.GAgents.GitHubAnalysis", LogLevel.Debug);
             });
     })
     .ConfigureServices((hostContext, services) =>

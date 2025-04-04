@@ -35,82 +35,31 @@ public static class GitHubIssueAnalysisGAgentsModule
             return new GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubClient(personalAccessToken);
         });
 
-        // Configure Azure OpenAI Options from configuration or environment variables
-        if (configuration != null)
-        {
-            services.Configure<AzureOpenAIOptions>(options =>
-            {
-                // First try configuration
-                options.ApiKey = configuration["AzureOpenAI:ApiKey"] ?? "";
-                options.Endpoint = configuration["AzureOpenAI:Endpoint"] ?? "";
-                options.DeploymentName = configuration["AzureOpenAI:DeploymentName"] ?? "";
-                options.ModelName = configuration["AzureOpenAI:ModelName"] ?? "gpt-35-turbo";
-                options.ApiVersion = configuration["AzureOpenAI:ApiVersion"] ?? "2024-02-15-preview";
-                
-                // If values are empty, try environment variables
-                if (string.IsNullOrEmpty(options.ApiKey))
-                    options.ApiKey = Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY") ?? "";
-                
-                if (string.IsNullOrEmpty(options.Endpoint))
-                    options.Endpoint = Environment.GetEnvironmentVariable("AZURE_OPENAI_ENDPOINT") ?? "";
-                
-                if (string.IsNullOrEmpty(options.DeploymentName))
-                    options.DeploymentName = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_NAME") ?? "";
-                
-                if (string.IsNullOrEmpty(options.ModelName))
-                    options.ModelName = Environment.GetEnvironmentVariable("AZURE_OPENAI_MODEL_NAME") ?? "gpt-35-turbo";
-                
-                if (string.IsNullOrEmpty(options.ApiVersion))
-                    options.ApiVersion = Environment.GetEnvironmentVariable("AZURE_OPENAI_API_VERSION") ?? "2024-02-15-preview";
-            });
-        }
-        else 
-        {
-            // If no configuration, try environment variables
-            services.Configure<AzureOpenAIOptions>(options =>
-            {
-                options.ApiKey = Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY") ?? "";
-                options.Endpoint = Environment.GetEnvironmentVariable("AZURE_OPENAI_ENDPOINT") ?? "";
-                options.DeploymentName = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_NAME") ?? "";
-                options.ModelName = Environment.GetEnvironmentVariable("AZURE_OPENAI_MODEL_NAME") ?? "gpt-35-turbo";
-                options.ApiVersion = Environment.GetEnvironmentVariable("AZURE_OPENAI_API_VERSION") ?? "2024-02-15-preview";
-            });
-        }
-
-        // Add HTTP client for Azure OpenAI with Polly for resilience
-        services.AddHttpClient("AzureOpenAI")
-            .AddPolicyHandler(GetRetryPolicy())
-            .ConfigureHttpClient(client =>
-            {
-                client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-            });
-
         // Configure Google Gemini Options from configuration or environment variables
-        if (configuration != null)
+        services.Configure<GoogleGeminiOptions>(options =>
         {
-            services.Configure<GoogleGeminiOptions>(options =>
+            // Get API key from environment variable
+            string apiKey = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_API_KEY") ?? "";
+            if (string.IsNullOrEmpty(apiKey)) 
             {
-                // First try configuration
-                options.ApiKey = configuration["GoogleGemini:ApiKey"] ?? "";
-                options.Model = configuration["GoogleGemini:Model"] ?? "gemini-pro";
-                
-                // If values are empty, try environment variables
-                if (string.IsNullOrEmpty(options.ApiKey))
-                    options.ApiKey = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_API_KEY") ?? "";
-                
-                if (string.IsNullOrEmpty(options.Model))
-                    options.Model = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_MODEL") ?? "gemini-pro";
-            });
-        }
-        else
-        {
-            // If no configuration, try environment variables
-            services.Configure<GoogleGeminiOptions>(options =>
+                apiKey = configuration?.GetValue<string>("GoogleGemini:ApiKey") ?? "";
+            }
+            options.ApiKey = apiKey;
+            
+            // Get model from environment variable
+            string model = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_MODEL") ?? "";
+            if (string.IsNullOrEmpty(model))
             {
-                options.ApiKey = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_API_KEY") ?? "";
-                options.Model = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_MODEL") ?? "gemini-pro";
-            });
-        }
+                model = configuration?.GetValue<string>("GoogleGemini:Model") ?? "gemini-1.5-flash";
+            }
+            options.Model = model;
+            
+            // Log configuration
+            var loggerFactory = services.BuildServiceProvider().GetService<ILoggerFactory>();
+            var logger = loggerFactory?.CreateLogger("GoogleGeminiConfig");
+            logger?.LogInformation("Configured Gemini with API key length: {Length}, Model: {Model}", 
+                apiKey?.Length ?? 0, model);
+        });
 
         // Add HTTP client for Google Gemini with Polly for resilience
         services.AddHttpClient("GoogleGemini")
@@ -120,66 +69,46 @@ public static class GitHubIssueAnalysisGAgentsModule
                 client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             });
 
-        // Register Google Gemini Service
-        services.AddTransient<GoogleGeminiService>();
-
         // Register all LLM service implementations
-        services.AddTransient<AzureOpenAIService>();
         services.AddTransient<GoogleGeminiService>();
         services.AddTransient<FallbackLLMService>();
 
-        // Register composite LLM service that will try services in order
+        // Register composite LLM service with Gemini prioritized
         services.AddTransient<CompositeLLMService>(provider => 
         {
             var logger = provider.GetRequiredService<ILogger<CompositeLLMService>>();
-            logger.LogWarning("Creating CompositeLLMService");
+            var geminiService = provider.GetRequiredService<GoogleGeminiService>();
+            var fallbackService = provider.GetRequiredService<FallbackLLMService>();
             
-            // Extract configuration settings for debugging
-            var azureApiKey = configuration?["AzureOpenAI:ApiKey"] ?? Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY") ?? "";
-            var azureEndpoint = configuration?["AzureOpenAI:Endpoint"] ?? Environment.GetEnvironmentVariable("AZURE_OPENAI_ENDPOINT") ?? "";
-            var geminiApiKey = configuration?["GoogleGemini:ApiKey"] ?? Environment.GetEnvironmentVariable("GOOGLE_GEMINI_API_KEY") ?? "";
+            // Get API key for logging
+            var geminiApiKey = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_API_KEY") ?? "";
+            var geminiModel = Environment.GetEnvironmentVariable("GOOGLE_GEMINI_MODEL") ?? "gemini-1.5-flash";
             
-            // Try configuration first, then environment variable
-            bool useFallbackLLM = configuration?.GetValue<bool>("UseFallbackLLM") ?? false;
-            if (!useFallbackLLM)
-            {
-                string envFallback = Environment.GetEnvironmentVariable("USE_FALLBACK_LLM") ?? "";
-                useFallbackLLM = !string.IsNullOrEmpty(envFallback) && 
-                                 (envFallback.ToLower() == "true" || envFallback == "1");
-            }
+            // Log configuration
+            logger.LogWarning("Configuring CompositeLLMService prioritizing Google Gemini API");
+            logger.LogWarning("Gemini API key present: {HasKey}", !string.IsNullOrEmpty(geminiApiKey));
+            logger.LogWarning("Gemini model: {Model}", geminiModel);
             
-            logger.LogWarning("Azure OpenAI API Key present: {HasKey}", !string.IsNullOrEmpty(azureApiKey));
-            logger.LogWarning("Azure OpenAI Endpoint present: {HasEndpoint}", !string.IsNullOrEmpty(azureEndpoint));
-            logger.LogWarning("Google Gemini API Key present: {HasKey}", !string.IsNullOrEmpty(geminiApiKey));
-            logger.LogWarning("UseFallbackLLM flag: {UseFallbackLLM}", useFallbackLLM);
+            Console.WriteLine("\n***************** LLM CONFIGURATION *****************");
+            Console.WriteLine($"Google Gemini API Key: {(string.IsNullOrEmpty(geminiApiKey) ? "Not found" : $"Present [{geminiApiKey.Length} chars]")}");
+            Console.WriteLine($"Google Gemini Model: {geminiModel}");
+            Console.WriteLine("****************************************************\n");
             
-            // Build the list of services to try in order
+            // Create the service list
             var services = new List<ILLMService>();
             
-            // If fallback flag is set, only use the mock service
-            if (useFallbackLLM)
-            {
-                logger.LogWarning("UseFallbackLLM flag is set, using only the FallbackLLMService");
-                services.Add(provider.GetRequiredService<FallbackLLMService>());
-                return new CompositeLLMService(logger, services);
-            }
-            
-            // Otherwise, try cloud services first (in order of preference)
-            if (!string.IsNullOrEmpty(azureApiKey))
-            {
-                logger.LogWarning("Adding AzureOpenAIService to composite service");
-                services.Add(provider.GetRequiredService<AzureOpenAIService>());
-            }
-            
+            // Always try Gemini first if we have an API key
             if (!string.IsNullOrEmpty(geminiApiKey))
             {
-                logger.LogWarning("Adding GoogleGeminiService to composite service");
-                services.Add(provider.GetRequiredService<GoogleGeminiService>());
+                logger.LogWarning("Adding GoogleGeminiService as primary LLM service");
+                Console.WriteLine("USING GOOGLE GEMINI AS PRIMARY LLM SERVICE");
+                services.Add(geminiService);
             }
             
             // Always add fallback as last resort
-            logger.LogWarning("Adding FallbackLLMService to composite service");
-            services.Add(provider.GetRequiredService<FallbackLLMService>());
+            logger.LogWarning("Adding FallbackLLMService as fallback");
+            Console.WriteLine("ADDING FALLBACK LLM SERVICE AS FALLBACK");
+            services.Add(fallbackService);
             
             return new CompositeLLMService(logger, services);
         });
