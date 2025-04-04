@@ -294,7 +294,7 @@ static async Task AnalyzeGitHubRepositoryAsync(
                 Title = issue.Title,
                 Description = issue.Description,
                 Status = issue.Status,
-                State = issue.Status, // Using Status as State
+                State = issue.Status, // Using Status as State - this is correct
                 Url = issue.Url,
                 Repository = issue.Repository,
                 CreatedAt = issue.CreatedAt,
@@ -313,13 +313,31 @@ static async Task AnalyzeGitHubRepositoryAsync(
         // Display the issues we found to give the user visibility
         Console.WriteLine("\nIssues found for analysis:");
         Console.WriteLine("---------------------------");
+        int openCount = 0;
+        int closedCount = 0;
+        
         foreach (var issue in issues)
         {
             Console.WriteLine($"#{issue.Id}: {issue.Title}");
             Console.WriteLine($"  Status: {issue.Status}");
+            
+            // Track counts by status
+            if (issue.Status?.ToLower() == "open")
+                openCount++;
+            else if (issue.Status?.ToLower() == "closed")
+                closedCount++;
+                
             Console.WriteLine($"  Labels: {string.Join(", ", issue.Labels)}");
             Console.WriteLine($"  URL: {issue.Url}");
             Console.WriteLine();
+        }
+        
+        Console.WriteLine("---------------------------");
+        Console.WriteLine($"Open issues: {openCount}, Closed issues: {closedCount}, Total: {issues.Count}");
+        if (issueState != "all" && ((issueState == "open" && closedCount > 0) || (issueState == "closed" && openCount > 0)))
+        {
+            Console.WriteLine("WARNING: Found issues with state not matching the requested state.");
+            Console.WriteLine("This could indicate an issue with state filtering.");
         }
         Console.WriteLine("---------------------------\n");
 
