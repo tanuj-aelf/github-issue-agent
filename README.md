@@ -20,16 +20,9 @@ GITHUB_PERSONAL_ACCESS_TOKEN=your_github_token_here
 
 3. Example `.env` file for the silo:
 ```
-# LLM API Configuration
-AZURE_OPENAI_API_KEY=your_azure_openai_key_here
-AZURE_OPENAI_ENDPOINT=your_azure_endpoint_here
-AZURE_OPENAI_DEPLOYMENT_NAME=your_deployment_name
-AZURE_OPENAI_MODEL_NAME=gpt-4o
-AZURE_OPENAI_API_VERSION=2024-02-15-preview
-
 # Google Gemini Configuration
 GOOGLE_GEMINI_API_KEY=your_gemini_key_here
-GOOGLE_GEMINI_MODEL=gemini-pro
+GOOGLE_GEMINI_MODEL=gemini-2.0-flash
 
 # GitHub API Configuration
 GITHUB_PERSONAL_ACCESS_TOKEN=your_github_token_here
@@ -42,7 +35,7 @@ USE_FALLBACK_LLM=true
 
 - Never commit `.env` files to your repository
 - The `.env` files are included in `.gitignore` to prevent accidental commits
-- If no API keys are provided, the application will use a fallback LLM service that provides static responses
+- If no API keys are provided, the application will use a fallback LLM service that provides basic responses
 
 ## Running the Application
 
@@ -67,4 +60,25 @@ The application uses the following configuration sources in order of precedence:
 2. appsettings.json
 3. Default values
 
-This allows for flexible configuration without exposing sensitive information in the codebase. 
+### LLM Services
+
+The application is configured to use:
+1. Google Gemini as the primary LLM service (when API key is provided)
+2. A fallback service when no API keys are available or in case of errors
+
+## Features
+
+- Analyze open and closed issues from GitHub repositories
+- Extract common themes and categorize issues
+- Generate recommendations based on issue analysis
+- Visualize issue statistics with percentage graphs
+- Support for filtering issues by state (open/closed/all)
+
+## Technical Architecture
+
+The application uses:
+- .NET for the application framework
+- Orleans for distributed computing and actor model
+- Memory streams for communication between components
+- Serilog for structured logging
+- Google Gemini API for AI analysis 
