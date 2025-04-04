@@ -18,7 +18,6 @@ public class CompositeLLMService : ILLMService
         _logger = logger;
         _services = services;
         
-        // Log the services that were registered
         _logger.LogWarning("CompositeLLMService constructed with {Count} services: [{Services}]", 
             services.Count(), 
             string.Join(", ", services.Select(s => s.GetType().Name)));
@@ -37,24 +36,20 @@ public class CompositeLLMService : ILLMService
 
     public async Task<string> CompletePromptAsync(string prompt)
     {
-        // Simple empty prompt check
         if (string.IsNullOrWhiteSpace(prompt)) 
         {
             _logger.LogError("Prompt is empty or whitespace. Cannot process empty prompt.");
             return "ERROR: Empty prompt provided to LLM service.";
         }
 
-        // Generate a unique request ID for tracking this specific request
         int requestId = Interlocked.Increment(ref _requestCount);
         
-        // Log detailed information about this request
         _logger.LogWarning("[Request #{RequestId}] ===============================================================", requestId);
         _logger.LogWarning("[Request #{RequestId}] Starting LLM request with {Count} available services", requestId, _services.Count());
         _logger.LogWarning("[Request #{RequestId}] Prompt length: {Length} characters", requestId, prompt?.Length ?? 0);
         _logger.LogWarning("[Request #{RequestId}] Prompt preview: {Preview}", requestId, prompt?.Length > 100 ? prompt.Substring(0, 100) + "..." : prompt);
         _logger.LogWarning("[Request #{RequestId}] ===============================================================", requestId);
         
-        // Also log to console for visibility
         Console.ForegroundColor = ConsoleColor.Magenta;
         Console.WriteLine($"\n[Request #{requestId}] =====================================================");
         Console.WriteLine($"[Request #{requestId}] STARTING LLM REQUEST WITH {_services.Count()} SERVICES");
@@ -64,7 +59,7 @@ public class CompositeLLMService : ILLMService
         Console.ResetColor();
         
         int serviceIndex = 0;
-        var servicesList = _services.ToList(); // Create a list for indexed access
+        var servicesList = _services.ToList();
         
         foreach (var service in servicesList)
         {
@@ -82,22 +77,17 @@ public class CompositeLLMService : ILLMService
                 Console.WriteLine($"\n[Request #{requestId}] >>> TRYING LLM SERVICE {serviceIndex}/{servicesList.Count}: {serviceName}");
                 Console.ResetColor();
                 
-                // Create a timed task with timeout
                 var serviceTask = service.CompletePromptAsync(prompt);
-                var timeoutTask = Task.Delay(isFallbackService ? 45000 : 30000); // Longer timeout for fallback service
+                var timeoutTask = Task.Delay(isFallbackService ? 45000 : 30000);
                 
-                // Start timing
                 var startTime = DateTime.UtcNow;
                 
-                // Wait for either task to complete
                 var completedTask = await Task.WhenAny(serviceTask, timeoutTask);
                 
-                // Calculate elapsed time
                 var elapsedTime = DateTime.UtcNow - startTime;
                 _logger.LogWarning("[Request #{RequestId}] Service {ServiceType} took {ElapsedMs}ms to respond", 
                     requestId, serviceName, elapsedTime.TotalMilliseconds);
                 
-                // Check if the service timed out
                 if (completedTask == timeoutTask)
                 {
                     _logger.LogWarning("[Request #{RequestId}] Service {ServiceType} timed out after {TimeoutMs}ms", 
@@ -107,7 +97,6 @@ public class CompositeLLMService : ILLMService
                     Console.WriteLine($"[Request #{requestId}] >>> SERVICE {serviceName} TIMED OUT AFTER {(isFallbackService ? 45 : 30)} SECONDS");
                     Console.ResetColor();
                     
-                    // For the last service (fallback), continue waiting for the result anyway
                     if (isLastService)
                     {
                         _logger.LogWarning("[Request #{RequestId}] This is the fallback service, continuing to wait for a response", requestId);
@@ -132,11 +121,9 @@ public class CompositeLLMService : ILLMService
                         }
                     }
                     
-                    // Otherwise, move to the next service
                     continue;
                 }
                 
-                // Get the result
                 var response = await serviceTask;
                 
                 if (!string.IsNullOrWhiteSpace(response))
@@ -146,7 +133,6 @@ public class CompositeLLMService : ILLMService
                     _logger.LogWarning("[Request #{RequestId}] Response length: {Length} characters", 
                         requestId, response.Length);
                     
-                    // Log the first part of the response for debugging
                     string responsePreview = response.Length > 100 ? response.Substring(0, 100) + "..." : response;
                     _logger.LogInformation("[Request #{RequestId}] Response preview: {Preview}", requestId, responsePreview);
                     
@@ -172,7 +158,6 @@ public class CompositeLLMService : ILLMService
                 
                 if (isFallbackService || isLastService)
                 {
-                    // If this is the fallback service and it failed, log extensively and try to return something usable
                     _logger.LogError(ex, "[Request #{RequestId}] CRITICAL ERROR: Fallback LLM service failed with exception: {ExMessage}", 
                         requestId, ex.Message);
                     
@@ -181,7 +166,6 @@ public class CompositeLLMService : ILLMService
                     Console.WriteLine($"[Request #{requestId}] >>> ATTEMPTING TO PROVIDE MINIMAL RESPONSE");
                     Console.ResetColor();
                     
-                    // Return a basic response based on prompt content
                     if (prompt.Contains("tags") || prompt.Contains("Tags"))
                     {
                         _logger.LogWarning("[Request #{RequestId}] Providing basic tag response", requestId);
@@ -198,29 +182,14 @@ public class CompositeLLMService : ILLMService
                         return "Unable to process request. Please try again later.";
                     }
                 }
-                
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"[Request #{requestId}] >>> ERROR WITH SERVICE {serviceName}: {ex.Message}");
-                Console.WriteLine($"[Request #{requestId}] >>> TRYING NEXT SERVICE");
-                Console.ResetColor();
             }
         }
-        
-        _logger.LogError("[Request #{RequestId}] All LLM services failed, returning minimal fallback response", requestId);
+
+        _logger.LogError("[Request #{RequestId}] CRITICAL ERROR: All LLM services failed", requestId);
         Console.ForegroundColor = ConsoleColor.Red;
-        Console.WriteLine($"\n[Request #{requestId}] >>> ALL LLM SERVICES FAILED, RETURNING MINIMAL FALLBACK RESPONSE");
+        Console.WriteLine($"[Request #{requestId}] >>> CRITICAL ERROR: ALL LLM SERVICES FAILED");
         Console.ResetColor();
         
-        // Provide minimal fallback response based on prompt content
-        if (prompt.Contains("tags") || prompt.Contains("Tags"))
-        {
-            return "bug, needs-review, open";
-        }
-        else if (prompt.Contains("recommendation") || prompt.Contains("Recommendation"))
-        {
-            return "RECOMMENDATION 1:\nTitle: Repository Review\nPriority: Medium\nDescription: General review recommended.\nSupporting Issues: All issues\n";
-        }
-        
-        return "AI analysis unavailable. Please check system configuration.";
+        return "ERROR: All available LLM services failed to process your request. Please try again later.";
     }
 } 

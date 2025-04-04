@@ -9,7 +9,6 @@ using OrleansDashboard;
 using Orleans.EventSourcing;
 using System.IO;
 
-// Load .env file if it exists
 string basePath = AppDomain.CurrentDomain.BaseDirectory;
 string envFile = Path.Combine(Directory.GetCurrentDirectory(), ".env");
 if (File.Exists(envFile))
@@ -31,14 +30,12 @@ if (File.Exists(envFile))
     }
 }
 
-// Configure logging
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
     .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
     .MinimumLevel.Override("Orleans", LogEventLevel.Warning)
     .MinimumLevel.Override("Orleans.Runtime", LogEventLevel.Warning)
     .MinimumLevel.Override("Orleans.Providers", LogEventLevel.Warning)
-    // Add more detailed logging for our components
     .MinimumLevel.Override("GitHubIssueAnalysis", LogEventLevel.Debug)
     .MinimumLevel.Override("GitHubIssueAnalysis.GAgents.Services", LogEventLevel.Debug)
     .Enrich.FromLogContext()
@@ -76,7 +73,6 @@ var builder = Host.CreateDefaultBuilder(args)
                 logging.AddConsole();
                 logging.SetMinimumLevel(LogLevel.Debug);
                 
-                // Configure specific namespace logging levels
                 logging.AddFilter("GitHubIssueAnalysis", LogLevel.Debug);
                 logging.AddFilter("GitHubIssueAnalysis.GAgents.Services", LogLevel.Debug);
                 logging.AddFilter("GitHubIssueAnalysis.GAgents.GitHubAnalysis", LogLevel.Debug);
@@ -84,11 +80,9 @@ var builder = Host.CreateDefaultBuilder(args)
     })
     .ConfigureServices((hostContext, services) =>
     {
-        // Register our GitHub Issue Analysis services
         services.AddGitHubIssueAnalysisGAgents(hostContext.Configuration);
     })
     .UseConsoleLifetime();
 
-// Build and run the host
 using var host = builder.Build();
-await host.RunAsync(); 
+await host.RunAsync();

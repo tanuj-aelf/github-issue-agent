@@ -15,13 +15,11 @@ using System.Threading.Tasks;
 using Serilog;
 using Serilog.Events;
 
-// Import types with aliases to avoid ambiguity
 using ClientGitHubIssueInfo = GitHubIssueAnalysis.GAgents.GrainInterfaces.Models.GitHubIssueInfo;
 using ClientGitHubIssueEvent = GitHubIssueAnalysis.GAgents.GrainInterfaces.Models.GitHubIssueEvent;
 using ClientRepositorySummaryReport = GitHubIssueAnalysis.GAgents.GrainInterfaces.Models.RepositorySummaryReport;
 using AnalysisGitHubIssueEvent = GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubIssueEvent;
 
-// Load .env file if it exists
 string basePath = AppDomain.CurrentDomain.BaseDirectory;
 string envFile = Path.Combine(Directory.GetCurrentDirectory(), ".env");
 if (File.Exists(envFile))
@@ -43,7 +41,6 @@ if (File.Exists(envFile))
     }
 }
 
-// Configure logging
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Debug()
     .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
@@ -51,7 +48,6 @@ Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
     .CreateLogger();
 
-// Configure and build the host
 var host = Host.CreateDefaultBuilder()
     .ConfigureAppConfiguration((hostContext, config) =>
     {
@@ -64,23 +60,16 @@ var host = Host.CreateDefaultBuilder()
     .UseOrleansClient(clientBuilder => 
     {
         clientBuilder.UseLocalhostClustering();
-        
-        // Configure the memory streams provider
         clientBuilder.AddMemoryStreams("MemoryStreams");
-        
-        // Add the Aevatar stream provider to match the Silo configuration
         clientBuilder.AddMemoryStreams("Aevatar");
     })
     .ConfigureServices((hostContext, services) => 
     {
-        // Register our GitHub client with configuration
         services.AddTransient<GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubClient>(provider => 
         {
-            // Use configuration for PAT if available, or fallback to environment variable
             var configuration = provider.GetRequiredService<IConfiguration>();
             string personalAccessToken = configuration["GitHub:PersonalAccessToken"] ?? "";
             
-            // Check if empty and try environment variable
             if (string.IsNullOrEmpty(personalAccessToken))
             {
                 personalAccessToken = Environment.GetEnvironmentVariable("GITHUB_PERSONAL_ACCESS_TOKEN") ?? "";
@@ -103,10 +92,8 @@ static async Task MainAsync(IHost host)
 {
     try 
     {
-        // Start the host
         await host.StartAsync();
 
-        // Get the client and cluster client
         var gitHubClient = host.Services.GetRequiredService<GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubClient>();
         var clusterClient = host.Services.GetRequiredService<IClusterClient>();
 
@@ -156,15 +143,14 @@ static async Task PublishIssuesToGAgent(
     Console.WriteLine("\nProcessing issues...");
     int processedCount = 0;
 
-    // Get a reference to the analysis grain with a fixed GUID
-    Guid analysisGrainId = Guid.Parse("E0E7DE68-438C-4DE3-9C4E-F6D52D87559E"); // Use fixed GUID for predictable activation
+    Guid analysisGrainId = Guid.Parse("E0E7DE68-438C-4DE3-9C4E-F6D52D87559E");
     var analysisGrain = clusterClient.GetGrain<GitHubIssueAnalysis.GAgents.GitHubAnalysis.IGitHubAnalysisGAgent>(analysisGrainId);
     Console.WriteLine($"Using analysis grain with ID: {analysisGrainId}");
     
     try
     {
         Console.WriteLine("Waiting 2 seconds for grain activation before sending first issue...");
-        await Task.Delay(2000); // Give the grain a moment to fully activate
+        await Task.Delay(2000);
 
         foreach (var issue in issues)
         {
@@ -172,7 +158,6 @@ static async Task PublishIssuesToGAgent(
             
             try
             {
-                // Create the event - convert from Model to Common type
                 var commonIssue = new GitHubIssueAnalysis.GAgents.Common.GitHubIssueInfo
                 {
                     Id = issue.Id,
@@ -185,13 +170,11 @@ static async Task PublishIssuesToGAgent(
                     Labels = issue.Labels
                 };
                 
-                // Create the event with the correct type
                 var gitHubIssueEvent = new AnalysisGitHubIssueEvent 
                 { 
                     IssueInfo = commonIssue
                 };
                 
-                // Send the event directly to the grain using RPC instead of streams
                 await analysisGrain.HandleGitHubIssueEventAsync(gitHubIssueEvent);
                 Console.WriteLine("Successfully published via direct grain call");
                 
@@ -203,11 +186,9 @@ static async Task PublishIssuesToGAgent(
                 Console.WriteLine(ex.StackTrace);
             }
             
-            // Add a small delay between requests
             await Task.Delay(500);
         }
         
-        // After all issues are processed, request the grain to generate a summary report
         Console.WriteLine("\nRequesting summary analysis...");
         await analysisGrain.GenerateSummaryReportAsync(issues.First().Repository);
     }
@@ -238,7 +219,6 @@ static async Task AnalyzeGitHubRepositoryAsync(
             maxIssues = 10;
         }
         
-        // Add option to select issue state
         Console.WriteLine("\nSelect which issues to analyze:");
         Console.WriteLine("1) Open issues only");
         Console.WriteLine("2) Closed issues only");
@@ -267,7 +247,6 @@ static async Task AnalyzeGitHubRepositoryAsync(
 
         Console.WriteLine($"\nFetching up to {maxIssues} {issueState} issues from {owner}/{repo}...");
 
-        // Fetch issues from GitHub with better error handling
         List<GitHubIssueAnalysis.GAgents.Common.GitHubIssueInfo> rawIssues;
         List<ClientGitHubIssueInfo> issues = new List<ClientGitHubIssueInfo>();
         
@@ -287,14 +266,13 @@ static async Task AnalyzeGitHubRepositoryAsync(
                 return;
             }
             
-            // Convert to the model's GitHubIssueInfo type
             issues = rawIssues.Select(issue => new ClientGitHubIssueInfo
             {
                 Id = issue.Id,
                 Title = issue.Title,
                 Description = issue.Description,
                 Status = issue.Status,
-                State = issue.Status, // Using Status as State - this is correct
+                State = issue.Status,
                 Url = issue.Url,
                 Repository = issue.Repository,
                 CreatedAt = issue.CreatedAt,
@@ -310,7 +288,6 @@ static async Task AnalyzeGitHubRepositoryAsync(
             return;
         }
 
-        // Display the issues we found to give the user visibility
         Console.WriteLine("\nIssues found for analysis:");
         Console.WriteLine("---------------------------");
         int openCount = 0;
@@ -321,7 +298,6 @@ static async Task AnalyzeGitHubRepositoryAsync(
             Console.WriteLine($"#{issue.Id}: {issue.Title}");
             Console.WriteLine($"  Status: {issue.Status}");
             
-            // Track counts by status
             if (issue.Status?.ToLower() == "open")
                 openCount++;
             else if (issue.Status?.ToLower() == "closed")
@@ -341,15 +317,12 @@ static async Task AnalyzeGitHubRepositoryAsync(
         }
         Console.WriteLine("---------------------------\n");
 
-        // Set up stream subscription for the event types
         Console.WriteLine("Setting up stream subscriptions for summary reports...");
 
-        // Create a subscription to the static stream with empty GUID for summary reports
         var summaryStreamId = StreamId.Create(GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubAnalysisStream.StreamNamespace, 
                                             GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubAnalysisStream.SummaryStreamKey);
         Console.WriteLine($"Subscribing to summary stream: {GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubAnalysisStream.StreamNamespace}/{GitHubIssueAnalysis.GAgents.GitHubAnalysis.GitHubAnalysisStream.SummaryStreamKey}");
         
-        // Subscribe to MemoryStreams first
         Console.WriteLine("Creating subscription with MemoryStreams provider...");
         var memoryStreamProvider = clusterClient.GetStreamProvider("MemoryStreams");
         var memoryStream = memoryStreamProvider.GetStream<ClientRepositorySummaryReport>(summaryStreamId);
@@ -367,7 +340,6 @@ static async Task AnalyzeGitHubRepositoryAsync(
                 Console.WriteLine("\n=== EXTRACTED THEMES ===");
                 Console.WriteLine("The following themes were identified in the repository issues:");
                 
-                // Format tag statistics into a table
                 if (summaryReport.TopTags != null && summaryReport.TopTags.Length > 0)
                 {
                     int maxTagWidth = Math.Max(12, summaryReport.TopTags.Select(t => t.Tag.Length).DefaultIfEmpty(0).Max());
@@ -378,7 +350,7 @@ static async Task AnalyzeGitHubRepositoryAsync(
                     foreach (var tag in summaryReport.TopTags)
                     {
                         double percentage = (double)tag.Count / summaryReport.TotalIssues * 100;
-                        int barLength = (int)(percentage / 5); // 20 chars = 100%
+                        int barLength = (int)(percentage / 5);
                         string bar = new string('█', Math.Min(barLength, 20));
                         
                         Console.WriteLine($"{tag.Tag.PadRight(maxTagWidth)} | {tag.Count,-5} | {percentage,9:F1}% | {bar}");
@@ -389,7 +361,6 @@ static async Task AnalyzeGitHubRepositoryAsync(
                     Console.WriteLine("No tags were extracted from the issues.");
                 }
                 
-                // Show recommendations
                 if (summaryReport.Recommendations != null && summaryReport.Recommendations.Length > 0)
                 {
                     Console.WriteLine("\n=== RECOMMENDATIONS ===");
@@ -414,7 +385,6 @@ static async Task AnalyzeGitHubRepositoryAsync(
             });
         Console.WriteLine("Successfully created subscription to summary stream with MemoryStreams");
 
-        // Try the Aevatar provider as well
         try
         {
             Console.WriteLine("Creating subscription with Aevatar provider...");
@@ -423,7 +393,6 @@ static async Task AnalyzeGitHubRepositoryAsync(
             var aevatarSubscription = await aevatarStream.SubscribeAsync(
                 (summaryReport, token) =>
                 {
-                    // Same handler as above, but we can just log that we received it through Aevatar
                     Console.WriteLine("Received summary report through Aevatar provider");
                     return Task.CompletedTask;
                 });
@@ -434,13 +403,11 @@ static async Task AnalyzeGitHubRepositoryAsync(
             Console.WriteLine($"Failed to create subscription with Aevatar provider: {ex.Message}");
         }
 
-        // Use the new method to publish issues directly to the grain
         await PublishIssuesToGAgent(clusterClient, issues, "MemoryStreams");
 
         Console.WriteLine("\nWaiting for the analysis to complete...");
         Console.WriteLine("This may take up to 30 seconds for the LLM to process the data.");
         
-        // Wait for a while to see if we get any responses
         for (int i = 0; i < 6; i++)
         {
             await Task.Delay(5000);
@@ -454,4 +421,4 @@ static async Task AnalyzeGitHubRepositoryAsync(
         Console.WriteLine($"Error during analysis: {ex.Message}");
         Console.WriteLine(ex.StackTrace);
     }
-} 
+}
